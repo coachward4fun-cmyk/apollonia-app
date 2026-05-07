@@ -1,0 +1,457 @@
+{
+  "exportedAt": "2026-05-03",
+  "jobs": [
+    {
+      "status": "Invoice Ready",
+      "jobType": "Roofing",
+      "billToName": "Sam Ward",
+      "billToAddress": "123 Apple Ave, Omaha NE 68135",
+      "email": "scott.ward.omaha@gmail.com",
+      "salesperson": "Henry Nazeraj",
+      "jobLocationAddress": "205 Apple Ave, Ames, IA 50010",
+      "projectName": "Replace roof and add gutter guards",
+      "targetDate": "2026-05-02",
+      "id": "monjivm6hj0f",
+      "lastUpdate": "2026-05-03",
+      "invoiceNumber": "ABC123",
+      "crewId": "monkz1oufrgu",
+      "invoiceDate": "2026-05-03",
+      "dueDate": "2026-06-02",
+      "invoiceTotal": 4674.83,
+      "lineItems": [
+        {
+          "description": "Install new shingles (Squares)",
+          "qty": 40,
+          "unitPrice": 80
+        },
+        {
+          "description": "Remove all shingles down to deck",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Remove extra layer of shingles",
+          "qty": 40,
+          "unitPrice": 15
+        },
+        {
+          "description": "Replace plywood",
+          "qty": 0,
+          "unitPrice": 15
+        },
+        {
+          "description": "Remove extra layer of papers",
+          "qty": 0,
+          "unitPrice": 5
+        },
+        {
+          "description": "Install new gutter aprons",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new drip edge",
+          "qty": 5,
+          "unitPrice": 20
+        },
+        {
+          "description": "Install two rows ice and water",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new valley",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install synthetic paper",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Dump Fee Total Cost",
+          "qty": 1,
+          "unitPrice": 469
+        },
+        {
+          "description": "Destination Fee",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Clean up and haul away all debris",
+          "qty": 1,
+          "unitPrice": 0
+        }
+      ]
+    },
+    {
+      "status": "Invoice Ready",
+      "jobType": "Roofing",
+      "billToName": "Henerys Construction",
+      "billToAddress": "555 Pear Street, Council Bluffs, IA 58123",
+      "email": "scott.ward.omaha@gmail.com",
+      "salesperson": "Mary",
+      "jobLocationAddress": "555 Pear Street, Council Bluffs, IA 58123",
+      "projectName": "Full Roof Replacement",
+      "targetDate": "2026-05-01",
+      "crewId": "monl1w26e7k4",
+      "id": "monofpvbexk8",
+      "lastUpdate": "2026-05-02",
+      "invoiceNumber": "231",
+      "invoiceDate": "2026-05-02",
+      "dueDate": "2026-06-01",
+      "invoiceTotal": 3497.83,
+      "lineItems": [
+        {
+          "description": "Remove all shingles down to deck",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Remove extra layer of shingles",
+          "qty": 0,
+          "unitPrice": 15
+        },
+        {
+          "description": "Replace plywood",
+          "qty": 0,
+          "unitPrice": 15
+        },
+        {
+          "description": "Remove extra layer of papers",
+          "qty": 0,
+          "unitPrice": 5
+        },
+        {
+          "description": "Install new gutter aprons",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new drip edge",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install two rows ice and water",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new valley",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install synthetic paper",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new shingles (Squares)",
+          "qty": 35,
+          "unitPrice": 80
+        },
+        {
+          "description": "Dump Fee Total Cost",
+          "qty": 1,
+          "unitPrice": 469
+        },
+        {
+          "description": "Destination Fee",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Clean up and haul away all debris",
+          "qty": 1,
+          "unitPrice": 0
+        }
+      ],
+      "durationDays": "2"
+    },
+    {
+      "status": "Invoice Ready",
+      "jobType": "Roofing",
+      "billToName": "Toto Roofing Company",
+      "billToAddress": "54321 Clam Ave, Omaha, NE 68131",
+      "email": "scott.ward.omaha@gmail.com",
+      "salesperson": "John",
+      "jobLocationAddress": "5918 S 175th Cir, Omaha, NE  68135",
+      "projectName": "Repair Leak - North side",
+      "targetDate": "2026-05-04",
+      "crewId": "monkz1oufrgu",
+      "id": "monolg0xbk2s",
+      "lastUpdate": "2026-05-03",
+      "invoiceNumber": "26122-001",
+      "invoiceDate": "2026-05-02",
+      "dueDate": "2026-06-01",
+      "invoiceTotal": 4648.08,
+      "lineItems": [
+        {
+          "description": "Remove all shingles down to deck",
+          "qty": 0,
+          "unitPrice": 90
+        },
+        {
+          "description": "Remove extra layer of shingles",
+          "qty": 40,
+          "unitPrice": 15
+        },
+        {
+          "description": "Replace plywood",
+          "qty": 5,
+          "unitPrice": 15
+        },
+        {
+          "description": "Remove extra layer of papers",
+          "qty": 0,
+          "unitPrice": 5
+        },
+        {
+          "description": "Install new gutter aprons",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new drip edge",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install two rows ice and water",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new valley",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install synthetic paper",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Install new shingles (Squares)",
+          "qty": 40,
+          "unitPrice": 80
+        },
+        {
+          "description": "Dump Fee Total Cost",
+          "qty": 1,
+          "unitPrice": 469
+        },
+        {
+          "description": "Destination Fee",
+          "qty": 1,
+          "unitPrice": 0
+        },
+        {
+          "description": "Clean up and haul away all debris",
+          "qty": 1,
+          "unitPrice": 0
+        }
+      ]
+    },
+    {
+      "status": "Scheduled",
+      "jobType": "Roofing",
+      "billToName": "Royalty Roofing",
+      "billToAddress": "5918 S 175th Circle, Omaha NE 68135",
+      "email": "coachward4fun@gmail.com",
+      "salesperson": "Lenny",
+      "jobLocationAddress": "5918 S 175th Circle, Omaha NE 68135",
+      "projectName": "Marys House",
+      "targetDate": "2026-05-01",
+      "crewId": "monkz1oufrgu",
+      "durationDays": "1",
+      "invoiceNumber": "26122-002",
+      "id": "mop26mp24b35",
+      "lastUpdate": "2026-05-03",
+      "crewCostHelpers": "2"
+    }
+  ],
+  "crews": [
+    {
+      "id": "monkz1oufrgu",
+      "name": "Crew 1 - Bob",
+      "lead": {
+        "name": "Bob Smith",
+        "mobile": "531-222-6245",
+        "comment": "",
+        "email": "coachward4fun@gmail.com"
+      },
+      "members": [
+        {
+          "name": "Tim",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Mark",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Mike",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Danny",
+          "mobile": "",
+          "comment": ""
+        }
+      ]
+    },
+    {
+      "id": "monl1w26e7k4",
+      "name": "Crew 2 - Frank",
+      "lead": {
+        "name": "Frank Drumand",
+        "mobile": "402-312-3535",
+        "comment": "Not Weekends "
+      },
+      "members": [
+        {
+          "name": "Tommy",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Scott",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Billy",
+          "mobile": "",
+          "comment": ""
+        },
+        {
+          "name": "Pushka",
+          "mobile": "",
+          "comment": ""
+        }
+      ]
+    }
+  ],
+  "expenses": [
+    {
+      "id": "mop24ro3ateh",
+      "type": "job",
+      "date": "2026-05-02",
+      "amount": 1200,
+      "description": "Crew Cost — Replace roof and add gutter guards",
+      "createdAt": "2026-05-03",
+      "jobId": "monjivm6hj0f",
+      "jobName": "Replace roof and add gutter guards",
+      "addToInvoice": false,
+      "category": "Subcontractors & Labor",
+      "isCrewCost": true
+    },
+    {
+      "id": "mop0i13uf7m9",
+      "type": "job",
+      "date": "2026-05-04",
+      "amount": 1200,
+      "description": "Crew Cost — Repair Leak - North side",
+      "createdAt": "2026-05-03",
+      "jobId": "monolg0xbk2s",
+      "jobName": "Repair Leak - North side",
+      "addToInvoice": false,
+      "category": "Subcontractors & Labor",
+      "isCrewCost": true
+    },
+    {
+      "id": "monp86g01i1d",
+      "type": "company",
+      "date": "2026-05-01",
+      "amount": 75,
+      "description": "Tires for Trailer",
+      "createdAt": "2026-05-02",
+      "category": "Fuel & Transportation"
+    },
+    {
+      "id": "mono1ypz786n",
+      "type": "job",
+      "date": "2026-05-02",
+      "amount": 250,
+      "description": "Dump Fee",
+      "createdAt": "2026-05-02",
+      "jobId": "monjivm6hj0f",
+      "jobName": "Replace roof and add gutter guards",
+      "addToInvoice": true
+    },
+    {
+      "id": "mono18hkp9dw",
+      "type": "company",
+      "date": "2026-05-02",
+      "amount": 35.99,
+      "description": "Crew1 Water",
+      "createdAt": "2026-05-02",
+      "category": "Meals & Entertainment"
+    }
+  ],
+  "photos": [
+    {
+      "id": "moowlile6yq5",
+      "name": "IMG_1184.JPG",
+      "jobId": "monjivm6hj0f"
+    },
+    {
+      "id": "moowlig5b46b",
+      "name": "IMG_1185.JPG",
+      "jobId": "monjivm6hj0f"
+    },
+    {
+      "id": "moowltq3klyj",
+      "name": "IMG_1140.JPG",
+      "jobId": "monjivm6hj0f"
+    },
+    {
+      "id": "mooza4qatsyk",
+      "name": "IMG_1140.JPG",
+      "jobId": "monolg0xbk2s"
+    },
+    {
+      "id": "mooza4ujx44o",
+      "name": "IMG_1184.JPG",
+      "jobId": "monolg0xbk2s"
+    },
+    {
+      "id": "mooza4xon6od",
+      "name": "IMG_1185.JPG",
+      "jobId": "monolg0xbk2s"
+    },
+    {
+      "id": "mop28h5rri37",
+      "name": "IMG_1136.JPG",
+      "jobId": "mop26mp24b35"
+    },
+    {
+      "id": "mop28hcswdhh",
+      "name": "IMG_1137.JPG",
+      "jobId": "mop26mp24b35"
+    },
+    {
+      "id": "mop28h8yd9a2",
+      "name": "IMG_1138.JPG",
+      "jobId": "mop26mp24b35"
+    },
+    {
+      "id": "mop28h2tyd65",
+      "name": "IMG_1139.JPG",
+      "jobId": "mop26mp24b35"
+    },
+    {
+      "id": "mop28hk5rmoj",
+      "name": "IMG_1140.JPG",
+      "jobId": "mop26mp24b35"
+    }
+  ]
+}

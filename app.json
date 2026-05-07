@@ -3,6 +3,7 @@
     "name": "apollonia",
     "slug": "apollonia",
     "version": "1.0.0",
+    "scheme": "apolloniaconstruction",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -13,17 +14,45 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Apollonia needs camera access to take job site photos and expense receipts",
+        "NSPhotoLibraryUsageDescription": "Apollonia needs photo library access to attach photos to jobs and expenses",
+        "NSPhotoLibraryAddUsageDescription": "Apollonia needs access to save photos to your library",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.apolloniaconstruction.app"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker",
+      "expo-asset",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Apollonia needs photo library access to attach photos to jobs and expenses",
+          "cameraPermission": "Apollonia needs camera access to take job site photos and expense receipts"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e0e99a7a-2b55-4abc-b349-2637069eedf3"
+      }
+    },
+    "owner": "coachward"
   }
 }
