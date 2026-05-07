@@ -69,6 +69,12 @@ function buildMonthStats(jobs, expenses, monthKey) {
   return { totalJobs, invoiced, jobsPaid, revenue, expTotal, net, margin };
 }
 
+function localDateStr(i) {
+  const d = new Date();
+  d.setDate(d.getDate() + i);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function buildStats(jobs) {
   const total = jobs.length;
   let scheduled = 0;
@@ -81,6 +87,9 @@ function buildStats(jobs) {
   const next7 = Array(7).fill(0);
   const next7HasMissingCrew = Array(7).fill(false);
 
+  // Build the 7 date strings once using local time (no UTC parsing)
+  const next7DateStrs = Array.from({ length: 7 }, (_, i) => localDateStr(i));
+
   for (const job of jobs) {
     const status = (job.status || '').toLowerCase();
     const hasDate = !!(job.targetDate || job.scheduledDate);
@@ -92,16 +101,11 @@ function buildStats(jobs) {
       scheduled++;
       if (!hasCrew) scheduledNoCrew++;
 
-      const dateStr = job.targetDate || job.scheduledDate;
-      const d = new Date(dateStr);
-      if (!isNaN(d)) {
-        for (let i = 0; i < 7; i++) {
-          if (isSameDay(d, addDays(TODAY, i))) {
-            next7[i]++;
-            if (!hasCrew) next7HasMissingCrew[i] = true;
-            break;
-          }
-        }
+      const jobDateStr = job.targetDate || job.scheduledDate;
+      const idx = next7DateStrs.indexOf(jobDateStr);
+      if (idx !== -1) {
+        next7[idx]++;
+        if (!hasCrew) next7HasMissingCrew[idx] = true;
       }
     }
 
@@ -147,13 +151,14 @@ export default function DashboardScreen() {
   }, []);
 
   const WEEK_DAYS = Array.from({ length: 7 }, (_, i) => {
-    const d = addDays(TODAY, i);
+    const d = new Date();
+    d.setDate(d.getDate() + i);
     return {
       short: i === 0 ? 'Today' : d.toLocaleDateString('en-US', { weekday: 'short' }),
       num: d.getDate(),
       count: stats.next7[i],
       missingCrew: stats.next7HasMissingCrew[i],
-      dateStr: dateToStr(d),
+      dateStr: localDateStr(i),
     };
   });
 
