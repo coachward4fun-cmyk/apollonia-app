@@ -57,7 +57,7 @@ function jobMatchesFilter(job, filter) {
 
 function formatDate(dateStr) {
   if (!dateStr) return null;
-  const d = new Date(dateStr);
+  const d = new Date(dateStr + 'T00:00:00');
   if (isNaN(d)) return dateStr;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }

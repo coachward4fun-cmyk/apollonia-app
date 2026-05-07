@@ -145,9 +145,9 @@ function DatePickerField({ value, onChange, placeholder }) {
 export default function JobFormScreen() {
   const navigation = useNavigation();
   const route      = useRoute();
-  const jobId          = route.params?.jobId ?? null;
-  const returnToInvoice = route.params?.returnToInvoice ?? false;
-  const isEdit         = !!jobId;
+  const jobId    = route.params?.jobId ?? null;
+  const returnTo = route.params?.returnTo ?? null;
+  const isEdit   = !!jobId;
   const { canWrite }   = useAuth();
 
   const { width, height } = useWindowDimensions();
@@ -157,6 +157,7 @@ export default function JobFormScreen() {
 
   const [crews, setCrews] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [toast,  setToast]  = useState('');
 
   const [projectName,        setProjectName]        = useState('');
   const [jobType,            setJobType]            = useState('');
@@ -342,8 +343,13 @@ export default function JobFormScreen() {
       }
       setRemovedUrls([]);
 
-      if (returnToInvoice) {
-        navigation.navigate('Invoice', { preselectedJobId: id });
+      if (returnTo === 'invoiceDetails') {
+        setToast('Job updated');
+        setTimeout(() => {
+          setToast('');
+          // Use getParent() to navigate at the tab level, escaping the Jobs stack
+          navigation.getParent()?.navigate('Invoice', { preselectedJobId: id });
+        }, 1200);
       } else {
         navigation.goBack();
       }
@@ -595,12 +601,38 @@ export default function JobFormScreen() {
           )}
         </View>
       </Modal>
+
+      {toast ? (
+        <View style={styles.toast} pointerEvents="none">
+          <Ionicons name="checkmark-circle" size={18} color="#fff" />
+          <Text style={styles.toastText}>{toast}</Text>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f9fafb' },
+  toast: {
+    position: 'absolute',
+    bottom: 48,
+    left: 24,
+    right: 24,
+    backgroundColor: 'rgba(22,163,74,0.95)',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 6,
+  },
+  toastText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',

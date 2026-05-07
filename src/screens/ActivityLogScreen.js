@@ -43,8 +43,11 @@ export default function ActivityLogScreen() {
       let q = query(col, orderBy('timestamp', 'desc'), limit(PAGE_SIZE));
       if (after) q = query(col, orderBy('timestamp', 'desc'), startAfter(after), limit(PAGE_SIZE));
 
+      const HIDDEN_ACTIONS = new Set(['signed_in', 'signed_out', 'sign_in', 'sign_out']);
       const snap = await getDocs(q);
-      const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const docs = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((d) => !HIDDEN_ACTIONS.has(d.action));
 
       if (after) {
         setEntries((prev) => [...prev, ...docs]);

@@ -16,7 +16,6 @@ const FROM_EMAIL    = 'claudioroma999@gmail.com';
 const FROM_NAME     = 'Kleodian Nazeraj - Apollonia Construction LLC';
 const REPLY_TO      = 'claudioroma999@gmail.com';
 const CC_EMAILS     = ['claudioroma999@gmail.com', 'apolloniaconstructionllc@gmail.com'];
-const TAX_RATE      = 0.07;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -35,16 +34,19 @@ function formatDate(str) {
   return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
-function calcTotals(lineItems) {
+function calcTotals(lineItems, taxRateNum = 7) {
   const subtotal = lineItems.reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.unitPrice) || 0), 0);
-  const tax      = subtotal * TAX_RATE;
+  const tax      = subtotal * (taxRateNum / 100);
   return { subtotal, tax, total: subtotal + tax };
 }
 
 // ── HTML templates ─────────────────────────────────────────────────────────────
 
 function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, photoNote = '', logoBase64 = '') {
-  const { subtotal, tax, total } = calcTotals(lineItems);
+  const taxRateNum = job.taxRate != null ? job.taxRate : 7;
+  const taxLabel   = job.taxLabel || '';
+  const taxDisplay = `${taxRateNum}%${taxLabel ? ` - ${taxLabel}` : ''}`;
+  const { subtotal, tax, total } = calcTotals(lineItems, taxRateNum);
   const visibleItems = lineItems.filter((i) => (Number(i.qty) || 0) > 0);
 
   const itemRows = visibleItems.map((item) => {
@@ -96,7 +98,7 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, photo
               </tr>
               <tr>
                 <td style="font-size:12px;color:#9ca3af;padding:3px 0;padding-right:12px;">Due Date</td>
-                <td style="font-size:12px;font-weight:600;color:#dc2626;padding:3px 0;">${formatDate(dueDate)}</td>
+                <td style="font-size:12px;font-weight:600;color:#111827;padding:3px 0;">${formatDate(dueDate)}</td>
               </tr>
             </table>
           </td>
@@ -132,7 +134,7 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, photo
             <td style="padding:6px 0;font-size:13px;color:#111827;text-align:right;">${fmtDecimal(subtotal)}</td>
           </tr>
           <tr>
-            <td style="padding:6px 0;font-size:13px;color:#6b7280;">Tax (7%)</td>
+            <td style="padding:6px 0;font-size:13px;color:#6b7280;">Tax (${taxDisplay})</td>
             <td style="padding:6px 0;font-size:13px;color:#111827;text-align:right;">${fmtDecimal(tax)}</td>
           </tr>
           <tr>
@@ -259,7 +261,10 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
 
   // ── Plain-text version ──
   const visibleItems = lineItems.filter((i) => (Number(i.qty) || 0) > 0);
-  const { subtotal, tax, total } = calcTotals(lineItems);
+  const emailTaxRate = job.taxRate != null ? job.taxRate : 7;
+  const emailTaxLabel = job.taxLabel || '';
+  const emailTaxDisplay = `${emailTaxRate}%${emailTaxLabel ? ` - ${emailTaxLabel}` : ''}`;
+  const { subtotal, tax, total } = calcTotals(lineItems, emailTaxRate);
   const itemLines = visibleItems.map(
     (i) => `  ${i.description.padEnd(40)} ${String(i.qty).padStart(4)} x ${fmtDecimal(i.unitPrice).padStart(9)} = ${fmtDecimal((Number(i.qty) || 0) * (Number(i.unitPrice) || 0))}`,
   ).join('\n');
@@ -288,7 +293,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
     itemLines,
     '',
     `Subtotal : ${fmtDecimal(subtotal)}`,
-    `Tax (7%) : ${fmtDecimal(tax)}`,
+    `Tax (${emailTaxDisplay}) : ${fmtDecimal(tax)}`,
     `─────────────────────`,
     `Total Due: ${fmtDecimal(total)}`,
     '',

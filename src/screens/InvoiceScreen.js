@@ -68,11 +68,25 @@ function lineTotal(item) {
   return (parseFloat(item.qty) || 0) * (parseFloat(item.unitPrice) || 0);
 }
 
-function calcTotals(items) {
+function calcTotals(items, taxRateNum = 7) {
   const subtotal = items.reduce((s, item) => s + lineTotal(item), 0);
-  const tax      = subtotal * 0.07;
+  const tax      = subtotal * (taxRateNum / 100);
   const total    = subtotal + tax;
   return { subtotal, tax, total };
+}
+
+function detectTaxRate(address) {
+  if (!address) return { rate: 7.0, label: '' };
+  const addr = address.toUpperCase();
+  const inNE = /\bNE\b/.test(addr) || addr.includes('NEBRASKA');
+  const inIA = /\bIA\b/.test(addr) || addr.includes('IOWA');
+  const inSD = /\bSD\b/.test(addr) || addr.includes('SOUTH DAKOTA');
+  const inMO = /\bMO\b/.test(addr) || addr.includes('MISSOURI');
+  if (inNE) return addr.includes('OMAHA') ? { rate: 7.0, label: 'Omaha NE' } : { rate: 5.5, label: 'Nebraska' };
+  if (inIA) return { rate: 0, label: 'Iowa' };
+  if (inSD) return { rate: 0, label: 'South Dakota' };
+  if (inMO) return { rate: 0, label: 'Missouri' };
+  return { rate: 7.0, label: '' };
 }
 
 function generateInvoiceNumber(jobs) {
@@ -229,7 +243,7 @@ export default function InvoiceScreen() {
           setSelectedJobId(null);
           navigation.navigate('Jobs', {
             screen: 'JobForm',
-            params: { jobId, returnToInvoice: true },
+            params: { jobId, returnTo: 'invoiceDetails' },
           });
         }}
       />
@@ -358,6 +372,8 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
   const [invNumber, setInvNumber] = useState('');
   const [invDate,   setInvDate]   = useState(today());
   const [dueDate,   setDueDate]   = useState(addDays(today(), 30));
+  const [taxRate,   setTaxRate]   = useState('7');
+  const [taxLabel,  setTaxLabel]  = useState('');
   const [lineItems, setLineItems] = useState(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
   const [saving,    setSaving]    = useState(false);
   const [sending,   setSending]   = useState(false);
@@ -372,6 +388,12 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
       setInvNumber(preselectedJob.invoiceNumber || generateInvoiceNumber(jobs));
       setInvDate(preselectedJob.invoiceDate || today());
       setDueDate(preselectedJob.dueDate || addDays(today(), 30));
+
+      const detected = detectTaxRate(preselectedJob.jobLocationAddress);
+      const savedRate = preselectedJob.taxRate != null ? preselectedJob.taxRate : detected.rate;
+      const savedLabel = preselectedJob.taxLabel != null ? preselectedJob.taxLabel : detected.label;
+      setTaxRate(String(savedRate));
+      setTaxLabel(savedLabel);
 
       if (preselectedJob.lineItems && preselectedJob.lineItems.length > 0) {
         setLineItems(preselectedJob.lineItems.map((i) => ({
@@ -410,6 +432,8 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     setInvNumber('');
     setInvDate(today());
     setDueDate(addDays(today(), 30));
+    setTaxRate('7');
+    setTaxLabel('');
     setLineItems(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
     setSaving(false);
     setSending(false);
@@ -440,13 +464,16 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
   };
 
   const buildUpdatedJob = () => {
-    const { total } = calcTotals(lineItems);
+    const taxRateNum = parseFloat(taxRate) || 0;
+    const { total } = calcTotals(lineItems, taxRateNum);
     return {
       ...selJob,
       status:        'Invoice Ready',
       invoiceNumber: invNumber.trim(),
       invoiceDate:   invDate,
       dueDate:       dueDate,
+      taxRate:       taxRateNum,
+      taxLabel:      taxLabel,
       invoiceTotal:  Math.round(total * 100) / 100,
       lineItems:     lineItems.map((i) => ({
         description: i.description,
@@ -484,7 +511,9 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     }
   };
 
-  const { subtotal, tax, total } = calcTotals(lineItems);
+  const taxRateNum = parseFloat(taxRate) || 0;
+  const taxDisplay = `${taxRate}%${taxLabel ? ` - ${taxLabel}` : ''}`;
+  const { subtotal, tax, total } = calcTotals(lineItems, taxRateNum);
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
@@ -556,6 +585,25 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
                     returnKeyType="done"
                   />
                 </FormSection>
+
+                <FormSection title="TAX RATE (%)">
+                  <TextInput
+                    style={styles.detailInput}
+                    value={taxRate}
+                    onChangeText={(v) => {
+                      setTaxRate(v);
+                      // When manually overriding, clear auto-detected label so it doesn't mislead
+                    }}
+                    placeholder="7"
+                    placeholderTextColor={colors.textMuted}
+                    keyboardType="decimal-pad"
+                    selectTextOnFocus
+                    returnKeyType="done"
+                  />
+                </FormSection>
+                {taxLabel ? (
+                  <Text style={styles.taxHint}>Auto-detected: {taxLabel}</Text>
+                ) : null}
 
                 <NextButton label="Next: Line Items →" onPress={handleNext} />
               </>
@@ -686,7 +734,7 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
 
                 <View style={styles.totalsCard}>
                   <TotalRow label="Subtotal" value={fmtDecimal(subtotal)} />
-                  <TotalRow label="Tax (7%)"  value={fmtDecimal(tax)} />
+                  <TotalRow label={`Tax (${taxDisplay})`} value={fmtDecimal(tax)} />
                   <View style={styles.totalsDivider} />
                   <TotalRow label="Total" value={fmtDecimal(total)} bold />
                 </View>
@@ -902,6 +950,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.06, shadowRadius: 3, elevation: 1,
   },
   detailInput: { fontSize: 15, color: colors.textPrimary, paddingVertical: 14 },
+  taxHint: { fontSize: 12, color: colors.textMuted, marginTop: -10, marginBottom: 14, marginLeft: 4 },
 
   nextBtn: { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 8 },
   nextBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },

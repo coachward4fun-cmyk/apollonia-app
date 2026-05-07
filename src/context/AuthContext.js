@@ -2,7 +2,6 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { auth, db } from '../config/firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { logActivity } from '../services/activityLog';
 
 const ADMIN_EMAIL = 'coachward4fun@gmail.com';
 
@@ -17,7 +16,6 @@ export function AuthProvider({ children }) {
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser);
-        logActivity('signed_in', 'Signed in').catch(() => {});
         try {
           const userRef = doc(db, 'users', firebaseUser.uid);
           const snap    = await getDoc(userRef);
