@@ -1,0 +1,1165 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  View, Text, StyleSheet, Modal, TouchableOpacity, ScrollView,
+  TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
+  InteractionManager, Animated,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAIAssistant } from '../context/AIAssistantContext';
+import { useAppData } from '../context/AppDataContext';
+import { useAuth } from '../context/AuthContext';
+import { sendAIMessage, executeAction, extractFlowFields, VOICE_FLOWS } from '../services/aiService';
+import { isOnAdminTab, navigationRef } from '../utils/navigationRef';
+import { saveCustomer } from '../services/db';
+import {
+  parseSmartJobIntent, resolveDayHint, matchCustomers, matchJobType,
+  pickMostRecent, formatDateLabel,
+} from '../utils/smartJobIntent';
+
+const GREEN = '#16a34a';
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+function resolveCrewId(crewName, crews) {
+  if (!crewName) return null;
+  const lower = crewName.toLowerCase();
+  const match = crews.find((c) => c.name.toLowerCase().includes(lower) || lower.includes(c.name.toLowerCase()));
+  return match?.id || null;
+}
+
+function isYes(text) {
+  return /^(yes|yeah|yep|yup|correct|right|ok|okay|confirm|that'?s?\s+(right|correct)|sounds\s+good|perfect)/i.test(text.trim());
+}
+
+function isNo(text) {
+  return /^(no|nope|nah|wrong|incorrect|that'?s?\s+(wrong|not\s+right)|not\s+quite|re-?do|retry|again)/i.test(text.trim());
+}
+
+// Smart job-create helpers live in src/utils/smartJobIntent.js.
+
+// ── Component ──────────────────────────────────────────────────────────────────
+
+export default function AIAssistantPanel() {
+  const {
+    isOpen, closePanel,
+    isProcessing, setIsProcessing,
+    isSpeaking, speakText, stopSpeaking,
+    conversation, addMessage, clearConversation,
+    pendingVoiceText, clearPendingVoiceText,
+    voiceFlow, setVoiceFlow, startVoiceFlow, cancelVoiceFlow, pauseVoiceFlow, resumeVoiceFlow,
+    listenStatus,
+    startAutoListen, stopAutoListen,
+    registerInterimCallback,
+  } = useAIAssistant();
+
+  const { user }  = useAuth();
+  const { crews, jobTypes, activeJobs, customers: contextCustomers } = useAppData();
+  const insets    = useSafeAreaInsets();
+  const scrollRef = useRef(null);
+  const inputRef  = useRef(null);
+
+  const [textInput,      setTextInput]      = useState('');
+  const [localPending,   setLocalPending]   = useState(null);
+  const [autoListenMode, setAutoListenMode] = useState(null); // null | 'yesno' | 'openended'
+  const [listenFallback, setListenFallback] = useState(false);
+  // Customer picker shown when smart-create can't match the spoken/typed name.
+  // Shape: { customers: [{id, name, ...}], targetDate: 'YYYY-MM-DD' | '' } | null
+  const [customerPicker, setCustomerPicker] = useState(null);
+
+  const autoTimeoutRef      = useRef(null);
+  const pulseAnim           = useRef(new Animated.Value(1)).current;
+  const voiceFlowRef        = useRef(voiceFlow);
+  const handleSendRef       = useRef(null);
+  const handlePauseFlowRef  = useRef(null);
+  const lastTextRef         = useRef('');
+
+  // Keep voiceFlowRef current so async callbacks see latest state
+  useEffect(() => { voiceFlowRef.current = voiceFlow; }, [voiceFlow]);
+
+  // Pulse animation when auto-listen is active inside panel
+  useEffect(() => {
+    if (listenStatus === 'listening') {
+      const loop = Animated.loop(Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 1.5, duration: 500, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1.0, duration: 500, useNativeDriver: true }),
+      ]));
+      loop.start();
+      return () => { loop.stop(); pulseAnim.setValue(1); };
+    }
+  }, [listenStatus]);
+
+  // Auto-scroll when conversation grows
+  useEffect(() => {
+    if (conversation.length > 0) {
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+    }
+  }, [conversation.length, isProcessing]);
+
+  // Reset local state when panel closes
+  useEffect(() => {
+    if (!isOpen) {
+      clearTimeout(autoTimeoutRef.current);
+      stopAutoListen();
+      setAutoListenMode(null);
+      setListenFallback(false);
+      setLocalPending(null);
+      setCustomerPicker(null);
+      setTextInput('');
+      lastTextRef.current = '';
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Focus input when panel opens (skip if voice auto-submit will fire)
+  useEffect(() => {
+    if (isOpen && !pendingVoiceText) {
+      setTimeout(() => inputRef.current?.focus(), 400);
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When panel opens with an active paused voice flow, prompt to resume
+  useEffect(() => {
+    if (isOpen && voiceFlow?.paused && conversation.length === 0) {
+      const flowDef = VOICE_FLOWS[voiceFlow.type];
+      const msg = `Voice flow paused at step ${voiceFlow.step + 1} of ${flowDef.steps.length}. Say "resume" to continue, or use the button above.`;
+      addMessage({ role: 'assistant', content: msg });
+      speakText(msg);
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-listen core: starts mic with timeout + fallback ─────────────────────
+  const activateAutoListen = useCallback((mode) => {
+    if (!mode) return;
+    setAutoListenMode(mode);
+    setListenFallback(false);
+    clearTimeout(autoTimeoutRef.current);
+
+    // Register one-shot callback: clears timeout the moment speech recognition
+    // detects any audio input (interim result from WebView → FloatingMicButton → context).
+    registerInterimCallback(() => {
+      console.log('[Speech] User spoke - timeout cleared');
+      clearTimeout(autoTimeoutRef.current);
+    });
+
+    startAutoListen((result) => {
+      clearTimeout(autoTimeoutRef.current);
+      setAutoListenMode(null);
+      setListenFallback(false);
+
+      if (!result?.trim()) {
+        setListenFallback(true);
+        if (mode === 'openended') setTimeout(() => inputRef.current?.focus(), 150);
+        return;
+      }
+
+      const trimmed = result.trim();
+      if (/^(pause|stop|switch to manual|manual)/i.test(trimmed)) {
+        addMessage({ role: 'user', content: trimmed });
+        handlePauseFlowRef.current?.();
+        return;
+      }
+      handleSendRef.current?.(trimmed);
+    });
+
+    const timeoutSecs = mode === 'yesno' ? 3 : 8;
+    console.log(`[Speech] Mic activated - timeout: ${timeoutSecs}s`);
+    autoTimeoutRef.current = setTimeout(() => {
+      console.log('[Speech] Timeout expired - showing fallback');
+      stopAutoListen();
+      setListenFallback(true);
+      if (mode === 'openended') setTimeout(() => inputRef.current?.focus(), 150);
+    }, timeoutSecs * 1000);
+  }, [startAutoListen, stopAutoListen, addMessage, registerInterimCallback]);
+
+  // Retry auto-listen (called from fallback UI)
+  const retryAutoListen = useCallback(() => {
+    if (autoListenMode) activateAutoListen(autoListenMode);
+  }, [autoListenMode, activateAutoListen]);
+
+  // ── speakAndListen: speak then auto-listen ────────────────────────────────────
+  // mode: 'yesno' | 'openended' | null (null = speak only, no auto-listen)
+  //
+  // Primary: onDone callback — mic opens the instant speech truly finishes, so
+  // the speech recognizer never grabs the AVAudioSession while TTS is still playing.
+  //
+  // Fallback timer: fires only if onDone doesn't arrive (known iOS intermittent issue).
+  // Uses a generous estimate (words / 2.5 wps + 3 s) so speech is guaranteed complete
+  // before the mic opens. The activated flag ensures only one path triggers the mic.
+  const speakAndListen = useCallback((text, mode) => {
+    stopAutoListen();
+    clearTimeout(autoTimeoutRef.current);
+    setListenFallback(false);
+    if (mode) setAutoListenMode(mode);
+
+    if (!mode) {
+      speakText(text);
+      return;
+    }
+
+    const words = text.trim().split(/\s+/).length;
+    const fallbackMs = Math.max(5000, (words / 2.5) * 1000 + 3000);
+
+    console.log(`[Speech] Speaking (${words} words, fallback ${(fallbackMs / 1000).toFixed(1)}s): "${text.substring(0, 40)}"`);
+
+    let activated = false;
+    const activateOnce = (source) => {
+      if (activated) return;
+      activated = true;
+      clearTimeout(autoTimeoutRef.current);
+      if (!voiceFlowRef.current || voiceFlowRef.current.paused) return;
+      console.log(`[Speech] Activating mic via ${source}`);
+      activateAutoListen(mode);
+    };
+
+    speakText(text, { onDone: () => activateOnce('onDone') });
+    autoTimeoutRef.current = setTimeout(() => activateOnce('fallback-timer'), fallbackMs);
+  }, [stopAutoListen, speakText, activateAutoListen]);
+
+  // ── Voice flow: ask current step question ─────────────────────────────────────
+  const askFlowQuestion = useCallback((flow) => {
+    const flowDef = VOICE_FLOWS[flow.type];
+    if (!flowDef) return;
+    const step = flowDef.steps[flow.step];
+    if (!step) return;
+    const msg = step.question;
+    addMessage({ role: 'assistant', content: msg });
+    speakAndListen(msg, 'openended');
+  }, [addMessage, speakAndListen]);
+
+  // ── Voice flow: complete ──────────────────────────────────────────────────────
+  const completeFlow = useCallback(async (flowType, data) => {
+    const crewId = resolveCrewId(data.crewName, crews);
+
+    if (flowType === 'new_job') {
+      const prefill = {
+        billToName:         data.billToName  || '',
+        jobType:            data.jobType     || '',
+        jobLocationAddress: data.jobLocationAddress || '',
+        targetDate:         data.targetDate  || '',
+        crewId:             crewId           || '',
+        salesperson:        data.salesperson || '',
+        isNewCustomer:      true,
+      };
+
+      const doneMsg = "Great! I've opened the new job form with the details you provided. Review and tap Save.";
+      addMessage({ role: 'assistant', content: doneMsg });
+      speakText(doneMsg);
+
+      cancelVoiceFlow();
+      clearConversation();
+      // Short delay so speech can start before the modal closes
+      setTimeout(() => {
+        closePanel();
+        InteractionManager.runAfterInteractions(() => {
+          navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
+        });
+      }, 800);
+
+    } else if (flowType === 'new_customer') {
+      const id  = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const customer = {
+        id,
+        name:        data.name        || '',
+        email:       data.email       || '',
+        address:     data.address     || '',
+        salesperson: data.salesperson || '',
+        updatedAt:   new Date().toISOString(),
+      };
+      try {
+        await saveCustomer(customer);
+        const doneMsg = `Customer "${customer.name}" saved successfully.`;
+        addMessage({ role: 'assistant', content: doneMsg });
+        speakText(doneMsg);
+      } catch (err) {
+        addMessage({ role: 'assistant', content: `Error saving customer: ${err.message}` });
+      }
+      cancelVoiceFlow();
+
+    } else if (flowType === 'edit_job') {
+      // For edit_job, the 'changes' field contains a description
+      // The AI handled specific field updates via the normal flow
+      cancelVoiceFlow();
+    }
+  }, [crews, addMessage, speakText, cancelVoiceFlow, clearConversation, closePanel]);
+
+  // ── Handle pausing the voice flow ────────────────────────────────────────────
+  const handlePauseFlow = useCallback(() => {
+    if (!voiceFlow) return;
+    stopSpeaking(); // stop AI speech immediately when user pauses
+    clearTimeout(autoTimeoutRef.current);
+    stopAutoListen();
+    pauseVoiceFlow();
+
+    const flowDef  = VOICE_FLOWS[voiceFlow.type];
+    const totalSteps = flowDef.steps.length;
+    const msg = `Voice flow paused at step ${voiceFlow.step + 1} of ${totalSteps}. You can continue filling the form manually, or tap the assistant again to resume.`;
+    addMessage({ role: 'assistant', content: msg });
+
+    // For new_job: open the form with what we have so far so user can fill manually
+    if (voiceFlow.type === 'new_job') {
+      const crewId = resolveCrewId(voiceFlow.data.crewName, crews);
+      const prefill = {
+        billToName:         voiceFlow.data.billToName  || '',
+        jobType:            voiceFlow.data.jobType     || '',
+        jobLocationAddress: voiceFlow.data.jobLocationAddress || '',
+        targetDate:         voiceFlow.data.targetDate  || '',
+        crewId:             crewId || '',
+        salesperson:        voiceFlow.data.salesperson || '',
+      };
+      setTimeout(() => {
+        closePanel();
+        InteractionManager.runAfterInteractions(() => {
+          navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
+        });
+      }, 600);
+    } else {
+      closePanel();
+    }
+  }, [voiceFlow, pauseVoiceFlow, addMessage, crews, closePanel, stopSpeaking, stopAutoListen]);
+
+  // ── Handle resuming the voice flow ───────────────────────────────────────────
+  const handleResumeFlow = useCallback(() => {
+    resumeVoiceFlow();
+    const flowDef = VOICE_FLOWS[voiceFlow.type];
+    const step    = flowDef.steps[voiceFlow.step];
+    const msg     = `Resuming. ${step.question}`;
+    addMessage({ role: 'assistant', content: msg });
+    speakAndListen(msg, voiceFlow.confirming ? 'yesno' : 'openended');
+  }, [voiceFlow, resumeVoiceFlow, addMessage, speakAndListen]);
+
+  // ── Handle voice flow step: extract fields + confirm ─────────────────────────
+  const handleFlowStep = useCallback(async (userText) => {
+    const flowDef = VOICE_FLOWS[voiceFlow.type];
+    const step    = flowDef.steps[voiceFlow.step];
+
+    setIsProcessing(true);
+    try {
+      const extracted = await extractFlowFields({
+        userText,
+        fieldsToExtract: step.fields,
+        availableCrews:  crews,
+        availableJobTypes: jobTypes.map((t) => t.name || t),
+        today: new Date().toISOString().slice(0, 10),
+      });
+
+      const summary = extracted.summary || userText;
+      const { summary: _s, ...fieldData } = extracted;
+
+      // Store extracted data and ask for confirmation
+      setVoiceFlow((f) => f ? { ...f, confirming: true, confirmData: fieldData } : f);
+      const confirmMsg = `I heard: ${summary}. Is that correct?`;
+      addMessage({ role: 'assistant', content: confirmMsg });
+      speakAndListen(confirmMsg, 'yesno');
+    } catch (err) {
+      addMessage({ role: 'assistant', content: 'Sorry, I had trouble understanding that. Please try again.' });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [voiceFlow, crews, jobTypes, setIsProcessing, setVoiceFlow, addMessage, speakText]);
+
+  // ── Handle confirmation response (yes/no) ─────────────────────────────────────
+  const handleFlowConfirmation = useCallback(async (userText) => {
+    if (isYes(userText)) {
+      // Merge confirmed data and advance
+      const mergedData = { ...voiceFlow.data, ...(voiceFlow.confirmData || {}) };
+      const nextStep   = voiceFlow.step + 1;
+      const flowDef    = VOICE_FLOWS[voiceFlow.type];
+
+      if (nextStep >= flowDef.steps.length) {
+        // All steps done — complete the flow (no auto-listen needed)
+        setVoiceFlow((f) => f ? { ...f, step: nextStep, data: mergedData, confirming: false, confirmData: null } : f);
+        await completeFlow(voiceFlow.type, mergedData);
+      } else {
+        // Advance to next step
+        const nextStepDef = flowDef.steps[nextStep];
+        setVoiceFlow((f) => f ? { ...f, step: nextStep, data: mergedData, confirming: false, confirmData: null } : f);
+        addMessage({ role: 'assistant', content: nextStepDef.question });
+        speakAndListen(nextStepDef.question, 'openended');
+      }
+    } else if (isNo(userText)) {
+      // Re-ask the current step
+      setVoiceFlow((f) => f ? { ...f, confirming: false, confirmData: null } : f);
+      const question = VOICE_FLOWS[voiceFlow.type].steps[voiceFlow.step].question;
+      const retry    = `No problem. ${question}`;
+      addMessage({ role: 'assistant', content: retry });
+      speakAndListen(retry, 'openended');
+    } else {
+      const clarify = "Sorry, I didn't understand. Please say yes or no.";
+      addMessage({ role: 'assistant', content: clarify });
+      speakAndListen(clarify, 'yesno');
+    }
+  }, [voiceFlow, setVoiceFlow, addMessage, speakText, completeFlow]);
+
+  // ── Smart job-create: parse hint, match customer, open form ──────────────────
+
+  const openJobFormWithCustomer = useCallback((customer, targetDate, jobType) => {
+    const prefill = {
+      billToName:         customer?.name        || '',
+      billToAddress:      customer?.address     || '',
+      email:              customer?.email       || '',
+      salesperson:        customer?.salesperson || '',
+      targetDate:         targetDate            || '',
+      jobType:            jobType               || '',
+      isExistingCustomer: !!customer,
+    };
+    setCustomerPicker(null);
+    setTimeout(() => {
+      closePanel();
+      InteractionManager.runAfterInteractions(() => {
+        navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
+      });
+    }, 600);
+  }, [closePanel]);
+
+  const handleSmartCreateJob = useCallback(async ({ typeHint, customer: customerHint, dayHint }) => {
+    setIsProcessing(true);
+    try {
+      const customers   = contextCustomers;
+      const targetDate  = resolveDayHint(dayHint);
+      const matchedType = matchJobType(typeHint, jobTypes);
+
+      let matched   = null;
+      let multiple  = false;
+      if (customerHint) {
+        const matches = matchCustomers(customerHint, customers);
+        if (matches.length === 1) {
+          matched = matches[0];
+        } else if (matches.length > 1) {
+          matched  = pickMostRecent(matches);
+          multiple = true;
+        }
+      }
+
+      // No customer match → show picker chips, leave panel open
+      if (customerHint && !matched) {
+        const active = customers
+          .filter((c) => !c.archived && c.name)
+          .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+          .slice(0, 12);
+        const msg = active.length
+          ? `I couldn't find a customer matching "${customerHint}". Tap one to use it, or close and add a new customer first.`
+          : `I couldn't find a customer matching "${customerHint}", and there are no customers yet. Close this and add a customer first.`;
+        addMessage({ role: 'assistant', content: msg });
+        speakText(`I couldn't find a customer matching ${customerHint}. Please pick one from the list.`);
+        setCustomerPicker({ customers: active, targetDate: targetDate || '', jobType: matchedType || '' });
+        return;
+      }
+
+      const parts = [];
+      if (matchedType) parts.push(`Type: ${matchedType}`);
+      if (matched)     parts.push(`Customer: ${matched.name}${multiple ? ' (most recent match)' : ''}`);
+      if (targetDate)  parts.push(`Date: ${formatDateLabel(targetDate)}`);
+      let summary = parts.length
+        ? `Opening new job — ${parts.join(', ')}. Finish the rest of the form when ready.`
+        : `Opening new job form.`;
+      if (typeHint && !matchedType) {
+        summary += ` Job type "${typeHint}" isn't in your list — leaving it blank.`;
+      }
+      addMessage({ role: 'assistant', content: summary });
+      speakText(summary);
+
+      openJobFormWithCustomer(matched, targetDate, matchedType);
+    } catch (err) {
+      addMessage({ role: 'assistant', content: `Couldn't load customers: ${err.message}` });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [addMessage, speakText, setIsProcessing, openJobFormWithCustomer, jobTypes, contextCustomers]);
+
+  // ── Main send handler ─────────────────────────────────────────────────────────
+
+  const handleSend = useCallback(async (text) => {
+    const trimmed = text?.trim();
+    if (!trimmed || isProcessing) return;
+
+    // Cancel any pending auto-listen state before processing
+    clearTimeout(autoTimeoutRef.current);
+    setAutoListenMode(null);
+    setListenFallback(false);
+    stopAutoListen();
+
+    setTextInput('');
+    lastTextRef.current = '';
+    addMessage({ role: 'user', content: trimmed });
+
+    // ── Smart job-create fast path ───────────────────────────────────────────
+    // "New Job for Shamrock on Thursday" → resolve customer + date locally and
+    // open the form. We only intercept when at least one hint is parseable;
+    // a bare "new job" falls through to the existing voice-flow trigger.
+    if (!voiceFlow && !customerPicker) {
+      const intent = parseSmartJobIntent(trimmed);
+      if (intent && (intent.customer || intent.dayHint)) {
+        await handleSmartCreateJob(intent);
+        return;
+      }
+    }
+
+    // ── Resume paused flow ───────────────────────────────────────────────────
+    if (voiceFlow?.paused && /^resume/i.test(trimmed)) {
+      handleResumeFlow();
+      return;
+    }
+
+    // ── Active voice flow ────────────────────────────────────────────────────
+    if (voiceFlow && !voiceFlow.paused) {
+      const lower = trimmed.toLowerCase();
+
+      // Allow user to pause via text
+      if (/^(pause|stop|switch to manual|manual)/i.test(lower)) {
+        handlePauseFlow();
+        return;
+      }
+
+      if (voiceFlow.confirming) {
+        await handleFlowConfirmation(trimmed);
+      } else {
+        await handleFlowStep(trimmed);
+      }
+      return;
+    }
+
+    // ── Normal AI flow ───────────────────────────────────────────────────────
+    setIsProcessing(true);
+
+    const adminScreen = isOnAdminTab();
+    const userName    = user?.displayName || user?.email || 'User';
+
+    const history = [...conversation, { role: 'user', content: trimmed }].map((m) => ({
+      role:    m.role === 'user' ? 'user' : 'assistant',
+      content: m.content,
+    }));
+
+    try {
+      const result = await sendAIMessage(history, adminScreen, userName, { jobs: activeJobs, crews });
+
+      // START_VOICE_FLOW is handled immediately without YES/NO
+      if (result.pendingAction?.type === 'START_VOICE_FLOW') {
+        const { flowType } = result.pendingAction.data || {};
+        if (flowType && VOICE_FLOWS[flowType]) {
+          addMessage({ role: 'assistant', content: result.message, isCommand: false });
+          speakText(result.message);
+          startVoiceFlow(flowType);
+          // Give the spoken intro a moment, then ask first question with auto-listen
+          setTimeout(() => {
+            const firstQ = VOICE_FLOWS[flowType].steps[0].question;
+            addMessage({ role: 'assistant', content: firstQ });
+            speakAndListen(firstQ, 'openended');
+          }, 1800);
+        }
+        setIsProcessing(false);
+        return;
+      }
+
+      const isCommand = !!result.pendingAction;
+      addMessage({ role: 'assistant', content: result.message, isCommand });
+
+      if (result.pendingAction) {
+        setLocalPending(result.pendingAction);
+      }
+
+      if (!isCommand) {
+        speakText(result.message);
+      }
+    } catch (err) {
+      const isKeyErr = err.message?.includes('YOUR_KEY_HERE') || err.message?.includes('401');
+      addMessage({
+        role:    'assistant',
+        content: isKeyErr
+          ? 'API key not set. Add your Anthropic key to src/config/anthropic.js.'
+          : 'Sorry, I had trouble connecting. Please try again.',
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [
+    isProcessing, conversation, addMessage, speakText, speakAndListen, user,
+    voiceFlow, handlePauseFlow, handleResumeFlow, handleFlowStep, handleFlowConfirmation,
+    startVoiceFlow, setIsProcessing, stopAutoListen,
+    customerPicker, handleSmartCreateJob,
+    activeJobs, crews,
+  ]);
+
+  // Auto-submit voice transcript when panel opens
+  useEffect(() => {
+    if (!isOpen || !pendingVoiceText || isProcessing) return;
+    const text = pendingVoiceText;
+    clearPendingVoiceText();
+    const timer = setTimeout(() => handleSend(text), 350);
+    return () => clearTimeout(timer);
+  }, [isOpen, pendingVoiceText]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Confirm / cancel pending action ──────────────────────────────────────────
+
+  const handleConfirm = useCallback(async () => {
+    if (!localPending) return;
+    const action = localPending;
+    setLocalPending(null);
+    setIsProcessing(true);
+    try {
+      const result = await executeAction(action);
+      addMessage({ role: 'assistant', content: result });
+      speakText(result);
+    } catch (err) {
+      addMessage({ role: 'assistant', content: `Action failed: ${err.message}` });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [localPending, addMessage, speakText]);
+
+  const handleCancel = useCallback(() => {
+    setLocalPending(null);
+    const msg = 'Action cancelled.';
+    addMessage({ role: 'assistant', content: msg });
+    speakText(msg);
+  }, [addMessage, speakText]);
+
+  // ── Close ─────────────────────────────────────────────────────────────────────
+  // X always fully terminates: cancel any voice flow (active or paused), clear the
+  // conversation, and close the panel. No pausing, no confirmation, no navigation.
+
+  const handleClose = useCallback(() => {
+    console.log('[Panel] X tapped - terminating voice flow and closing panel');
+    clearTimeout(autoTimeoutRef.current);
+    stopAutoListen();
+    setAutoListenMode(null);
+    setListenFallback(false);
+    setLocalPending(null);
+    cancelVoiceFlow();
+    clearConversation();
+    closePanel();
+  }, [cancelVoiceFlow, clearConversation, closePanel, stopAutoListen]);
+
+  // Stable callback fed to memoized Bubble components — prevents the whole
+  // conversation list from re-rendering each time a new message is appended.
+  const handleSpeakContent = useCallback((content) => {
+    speakText(content);
+  }, [speakText]);
+
+  // iOS keyboard dictation fires onChangeText twice when dictation ends — once with
+  // the dictated text, and again after React reconciles the controlled value, producing
+  // a doubled string (e.g. "Create New Job Create New Job"). Track the last value and
+  // drop the second event when it matches the doubling pattern.
+  const handleChangeText = useCallback((text) => {
+    const prev = lastTextRef.current;
+    if (prev.length > 0 && text === prev + prev) return;
+    lastTextRef.current = text;
+    setTextInput(text);
+  }, []);
+
+  // Keep refs current so async auto-listen callbacks see latest closures
+  handleSendRef.current      = handleSend;
+  handlePauseFlowRef.current = handlePauseFlow;
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+
+  const flowDef      = voiceFlow ? VOICE_FLOWS[voiceFlow.type] : null;
+  const totalSteps   = flowDef ? flowDef.steps.length : 0;
+
+  return (
+    <Modal
+      visible={isOpen}
+      animationType="slide"
+      presentationStyle="overFullScreen"
+      transparent
+      statusBarTranslucent
+      onRequestClose={handleClose}
+    >
+      <KeyboardAvoidingView
+        style={styles.overlay}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        {/* Tap backdrop to close */}
+        <TouchableOpacity style={styles.backdrop} activeOpacity={1} onPress={handleClose} />
+
+        <View style={[styles.panel, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+          {/* Drag handle */}
+          <View style={styles.handle} />
+
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.headerLeft}>
+              <View style={styles.badge}>
+                <Ionicons name="sparkles" size={14} color="#fff" />
+              </View>
+              <Text style={styles.headerTitle}>Apollonia Assistant</Text>
+            </View>
+            <TouchableOpacity onPress={handleClose} hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}>
+              <Ionicons name="close-circle" size={26} color="#9ca3af" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Voice flow banner */}
+          {voiceFlow && flowDef && (
+            <View style={[styles.flowBanner, voiceFlow.paused && styles.flowBannerPaused]}>
+              <View style={styles.flowBannerLeft}>
+                <Ionicons
+                  name={voiceFlow.paused ? 'pause-circle' : 'mic'}
+                  size={16}
+                  color={voiceFlow.paused ? '#d97706' : GREEN}
+                />
+                <View style={{ marginLeft: 8 }}>
+                  <Text style={[styles.flowBannerTitle, voiceFlow.paused && { color: '#d97706' }]}>
+                    {voiceFlow.paused ? 'Voice Flow Paused' : flowDef.label}
+                  </Text>
+                  <Text style={styles.flowBannerSub}>
+                    Step {voiceFlow.step + 1} of {totalSteps}
+                  </Text>
+                </View>
+              </View>
+              {voiceFlow.paused ? (
+                <TouchableOpacity style={[styles.flowBannerBtn, styles.flowBannerBtnResume]} onPress={handleResumeFlow}>
+                  <Ionicons name="play" size={13} color={GREEN} />
+                  <Text style={[styles.flowBannerBtnText, { color: GREEN }]}>Resume</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity style={[styles.flowBannerBtn, styles.flowBannerBtnPause]} onPress={handlePauseFlow}>
+                  <Ionicons name="pause" size={13} color="#92400e" />
+                  <Text style={[styles.flowBannerBtnText, { color: '#92400e' }]}>Pause / Manual</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
+          {/* Conversation */}
+          <ScrollView
+            ref={scrollRef}
+            style={styles.scroll}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            {conversation.length === 0 && !voiceFlow && (
+              <View style={styles.empty}>
+                <Ionicons name="chatbubble-ellipses-outline" size={44} color={GREEN} style={{ opacity: 0.35 }} />
+                <Text style={styles.emptyTitle}>Ask me anything</Text>
+                <Text style={styles.emptyBody}>
+                  Type a question or say "create a new job" to start a guided voice flow. Use the{' '}
+                  <Text style={{ fontWeight: '700' }}>🎤</Text> on your keyboard to speak.
+                </Text>
+              </View>
+            )}
+
+            {conversation.map((msg, i) => (
+              <Bubble
+                key={i}
+                msg={msg}
+                onSpeak={handleSpeakContent}
+                isSpeaking={isSpeaking}
+              />
+            ))}
+
+            {isProcessing && (
+              <View style={styles.thinkRow}>
+                <ActivityIndicator size="small" color={GREEN} />
+                <Text style={styles.thinkText}>
+                  {voiceFlow && !voiceFlow.paused ? 'Extracting…' : 'Thinking…'}
+                </Text>
+              </View>
+            )}
+          </ScrollView>
+
+          {/* Auto-listen status + fallback — only shown during active voice flow */}
+          {voiceFlow && !voiceFlow.paused && !localPending && (listenStatus !== 'idle' || listenFallback) && (
+            <View style={styles.listenArea}>
+              {listenFallback ? (
+                <>
+                  <Text style={styles.listenFallbackMsg}>
+                    I didn't hear you — {autoListenMode === 'yesno' ? 'tap Yes or No' : 'type your response or try again'}
+                  </Text>
+                  {autoListenMode === 'yesno' && (
+                    <View style={styles.listenYesNoRow}>
+                      <TouchableOpacity
+                        style={[styles.listenBtn, { backgroundColor: GREEN }]}
+                        onPress={() => { setListenFallback(false); handleSend('yes'); }}
+                      >
+                        <Text style={styles.listenBtnText}>Yes</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.listenBtn, { backgroundColor: '#dc2626' }]}
+                        onPress={() => { setListenFallback(false); handleSend('no'); }}
+                      >
+                        <Text style={styles.listenBtnText}>No</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  <TouchableOpacity style={styles.retryMicBtn} onPress={retryAutoListen}>
+                    <Ionicons name="mic-outline" size={15} color={GREEN} />
+                    <Text style={styles.retryMicText}>Try again</Text>
+                  </TouchableOpacity>
+                </>
+              ) : listenStatus === 'waiting' ? (
+                <Text style={styles.listenWaiting}>· · ·</Text>
+              ) : (
+                <View style={styles.listeningRow}>
+                  <Animated.View style={[styles.listenDot, { transform: [{ scale: pulseAnim }] }]} />
+                  <Text style={styles.listeningText}>Listening…</Text>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* Customer picker — shown when smart-create can't find a match */}
+          {!!customerPicker && (
+            <View style={styles.pickerBox}>
+              <Text style={styles.pickerLabel}>
+                Pick a customer
+                {customerPicker.jobType    ? ` · ${customerPicker.jobType}` : ''}
+                {customerPicker.targetDate ? ` · ${formatDateLabel(customerPicker.targetDate)}` : ''}
+              </Text>
+              <ScrollView style={styles.pickerScroll} contentContainerStyle={styles.pickerChipsWrap} showsVerticalScrollIndicator={false}>
+                {customerPicker.customers.length === 0 ? (
+                  <Text style={styles.pickerEmpty}>No customers found.</Text>
+                ) : (
+                  customerPicker.customers.map((c) => (
+                    <TouchableOpacity
+                      key={c.id || c.name}
+                      style={styles.pickerChip}
+                      onPress={() => openJobFormWithCustomer(c, customerPicker.targetDate, customerPicker.jobType)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={styles.pickerChipText} numberOfLines={1}>{c.name}</Text>
+                    </TouchableOpacity>
+                  ))
+                )}
+              </ScrollView>
+              <TouchableOpacity style={styles.pickerCancel} onPress={() => setCustomerPicker(null)}>
+                <Text style={styles.pickerCancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* YES / NO confirmation panel */}
+          {!!localPending && (
+            <View style={styles.confirmBox}>
+              <Text style={styles.confirmDesc} numberOfLines={3}>
+                {localPending.description}
+              </Text>
+              <View style={styles.confirmBtns}>
+                <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: GREEN }]} onPress={handleConfirm}>
+                  <Text style={styles.confirmBtnText}>YES — Confirm</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: '#dc2626' }]} onPress={handleCancel}>
+                  <Text style={styles.confirmBtnText}>NO — Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          {/* Input row */}
+          <View style={styles.inputRow}>
+            <TextInput
+              ref={inputRef}
+              style={styles.input}
+              placeholder={
+                voiceFlow && !voiceFlow.paused
+                  ? (voiceFlow.confirming ? "Say 'yes' or 'no'…" : "Speak or type your answer…")
+                  : "Ask anything… (or tap 🎤 on keyboard)"
+              }
+              placeholderTextColor="#9ca3af"
+              value={textInput}
+              onChangeText={handleChangeText}
+              onSubmitEditing={() => handleSend(textInput)}
+              returnKeyType="send"
+              multiline={false}
+              editable={!isProcessing}
+            />
+            <TouchableOpacity
+              style={[styles.sendBtn, (!textInput.trim() || isProcessing) && styles.sendBtnOff]}
+              onPress={() => handleSend(textInput)}
+              disabled={!textInput.trim() || isProcessing}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="send" size={19} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ── Conversation bubble ───────────────────────────────────────────────────────
+// Memoized so appending a new message doesn't re-render the full list.
+// Relies on a stable onSpeak callback from the parent (handleSpeakContent).
+
+const Bubble = React.memo(function Bubble({ msg, onSpeak, isSpeaking }) {
+  const isUser = msg.role === 'user';
+  return (
+    <View style={[styles.bubbleWrap, isUser ? styles.bubbleWrapRight : styles.bubbleWrapLeft]}>
+      {!isUser && (
+        <View style={styles.aiBadge}>
+          <Ionicons name="sparkles" size={11} color="#fff" />
+        </View>
+      )}
+      <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAI]}>
+        <Text style={[styles.bubbleText, isUser ? styles.bubbleTextUser : styles.bubbleTextAI]}>
+          {msg.content}
+        </Text>
+        {!isUser && msg.isCommand && (
+          <TouchableOpacity style={styles.speakerBtn} onPress={() => onSpeak(msg.content)}>
+            <Ionicons
+              name={isSpeaking ? 'volume-high' : 'volume-medium-outline'}
+              size={16}
+              color={GREEN}
+            />
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+});
+
+const styles = StyleSheet.create({
+  overlay:  { flex: 1, justifyContent: 'flex-end' },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
+
+  panel: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    maxHeight: '88%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -5 },
+    shadowOpacity: 0.16,
+    shadowRadius: 12,
+    elevation: 22,
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40, height: 4,
+    borderRadius: 2,
+    backgroundColor: '#e5e7eb',
+    marginTop: 10, marginBottom: 4,
+  },
+
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  headerLeft:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  badge: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: GREEN,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  headerTitle: { fontSize: 16, fontWeight: '700', color: '#111827' },
+
+  // Voice flow banner
+  flowBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: '#f0fdf4',
+    borderBottomWidth: 1,
+    borderBottomColor: '#bbf7d0',
+  },
+  flowBannerPaused: {
+    backgroundColor: '#fffbeb',
+    borderBottomColor: '#fde68a',
+  },
+  flowBannerLeft:  { flexDirection: 'row', alignItems: 'center' },
+  flowBannerTitle: { fontSize: 13, fontWeight: '700', color: '#166534' },
+  flowBannerSub:   { fontSize: 11, color: '#4b7c5a', marginTop: 1 },
+  flowBannerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  flowBannerBtnPause:  { borderColor: '#d97706', backgroundColor: '#fef3c7' },
+  flowBannerBtnResume: { borderColor: GREEN,     backgroundColor: '#f0fdf4' },
+  flowBannerBtnText:   { fontSize: 12, fontWeight: '700' },
+
+  scroll:        { maxHeight: 400 },
+  scrollContent: { padding: 16, gap: 10, flexGrow: 1 },
+
+  empty: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 28,
+    gap: 10,
+  },
+  emptyTitle: { fontSize: 15, fontWeight: '700', color: '#374151' },
+  emptyBody:  { fontSize: 13, color: '#6b7280', textAlign: 'center', lineHeight: 19 },
+
+  bubbleWrap:      { flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
+  bubbleWrapRight: { justifyContent: 'flex-end' },
+  bubbleWrapLeft:  { justifyContent: 'flex-start' },
+  aiBadge: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: GREEN,
+    alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0, marginBottom: 2,
+  },
+  bubble:         { maxWidth: '78%', borderRadius: 18, paddingHorizontal: 13, paddingVertical: 9 },
+  bubbleUser:     { backgroundColor: GREEN, borderBottomRightRadius: 4 },
+  bubbleAI:       { backgroundColor: '#f3f4f6', borderBottomLeftRadius: 4 },
+  bubbleText:     { fontSize: 14, lineHeight: 20 },
+  bubbleTextUser: { color: '#fff' },
+  bubbleTextAI:   { color: '#111827' },
+  speakerBtn:     { alignSelf: 'flex-end', marginTop: 5 },
+
+  thinkRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4,
+  },
+  thinkText: { fontSize: 13, color: '#9ca3af', fontStyle: 'italic' },
+
+  // Auto-listen area
+  listenArea: {
+    borderTopWidth: 1,
+    borderTopColor: '#f0fdf4',
+    backgroundColor: '#f9fffe',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    alignItems: 'center',
+    gap: 8,
+  },
+  listenWaiting: {
+    fontSize: 20,
+    color: GREEN,
+    letterSpacing: 4,
+    fontWeight: '700',
+  },
+  listeningRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  listenDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: GREEN,
+  },
+  listeningText: {
+    fontSize: 14,
+    color: GREEN,
+    fontWeight: '700',
+  },
+  listenFallbackMsg: {
+    fontSize: 13,
+    color: '#6b7280',
+    textAlign: 'center',
+  },
+  listenYesNoRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  listenBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 12,
+    alignItems: 'center',
+    minWidth: 80,
+  },
+  listenBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  retryMicBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: GREEN,
+  },
+  retryMicText: {
+    fontSize: 13,
+    color: GREEN,
+    fontWeight: '600',
+  },
+
+  pickerBox: {
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 8,
+  },
+  pickerLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#374151',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  pickerScroll: { maxHeight: 160 },
+  pickerChipsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  pickerChip: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    maxWidth: '100%',
+  },
+  pickerChipText: { fontSize: 13, fontWeight: '600', color: GREEN },
+  pickerEmpty:    { fontSize: 13, color: '#6b7280', paddingVertical: 4 },
+  pickerCancel: {
+    alignSelf: 'flex-end',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  pickerCancelText: { fontSize: 13, fontWeight: '600', color: '#6b7280' },
+
+  confirmBox: {
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 8,
+  },
+  confirmDesc:    { fontSize: 13, fontWeight: '600', color: '#374151', textAlign: 'center' },
+  confirmBtns:    { flexDirection: 'row', gap: 10 },
+  confirmBtn:     { flex: 1, paddingVertical: 13, borderRadius: 13, alignItems: 'center' },
+  confirmBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+  },
+  input: {
+    flex: 1,
+    backgroundColor: '#f9fafb',
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: Platform.OS === 'ios' ? 11 : 8,
+    fontSize: 14,
+    color: '#111827',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  sendBtn: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: GREEN,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sendBtnOff: { backgroundColor: '#d1d5db' },
+});

@@ -4,9 +4,14 @@ import { View, Text, ActivityIndicator, StyleSheet, Image, Alert } from 'react-n
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
+import { AIAssistantProvider } from './src/context/AIAssistantContext';
+import { AppDataProvider } from './src/context/AppDataContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import LoginScreen from './src/screens/LoginScreen';
+import FloatingMicButton from './src/components/FloatingMicButton';
+import AIAssistantPanel from './src/components/AIAssistantPanel';
 import { ensureFirestoreData } from './src/utils/ensureFirestoreData';
+import { backfillJobIds } from './src/services/db';
 import { ExpiryBanner, ExpiryBlockScreen } from './src/components/ExpiryWarning';
 import { colors } from './src/theme/colors';
 
@@ -84,6 +89,11 @@ function RootContent() {
         console.warn('[Seed] Error:', err.message);
         // Don't block the user if seeding fails
       }
+      try {
+        await backfillJobIds();
+      } catch (err) {
+        console.warn('[JobId] Backfill error:', err.message);
+      }
       setAppStatus('ready');
     })();
   }, [user]);
@@ -125,9 +135,17 @@ function RootContent() {
   return (
     <View style={{ flex: 1 }}>
       <StatusBar style="light" />
+      {/* ExpiryBlockScreen renders a Modal — no flex impact */}
       <ExpiryBlockScreen />
-      <AppNavigator />
+      {/* Explicit flex:1 wrapper ensures the navigator always fills all remaining space
+          and is not compressed by any absolutely-positioned overlay siblings. */}
+      <View style={{ flex: 1 }}>
+        <AppNavigator />
+      </View>
+      {/* Overlays — all position:'absolute', zero flex impact */}
       <ExpiryBanner />
+      <FloatingMicButton />
+      <AIAssistantPanel />
     </View>
   );
 }
@@ -137,7 +155,11 @@ export default function App() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AuthProvider>
-          <RootContent />
+          <AIAssistantProvider>
+            <AppDataProvider>
+              <RootContent />
+            </AppDataProvider>
+          </AIAssistantProvider>
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
