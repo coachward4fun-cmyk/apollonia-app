@@ -24,10 +24,22 @@ admin.initializeApp({
 const db = admin.firestore();
 
 async function main() {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const fromNumber = process.env.TWILIO_FROM_NUMBER;
+
+  if (!accountSid || !authToken || !fromNumber) {
+    console.error('Missing required env vars: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER');
+    console.error('Set them in a .env file or inline, e.g.:');
+    console.error('  TWILIO_ACCOUNT_SID=AC... TWILIO_AUTH_TOKEN=... TWILIO_FROM_NUMBER=+1... \\');
+    console.error('    node scripts/seedTwilioConfig.js');
+    process.exit(1);
+  }
+
   await db.collection('meta').doc('twilioConfig').set({
-    accountSid:  'REDACTED_TWILIO_SID',
-    authToken:   'REDACTED_TWILIO_TOKEN',
-    fromNumber:  '+18772694012',
+    accountSid,
+    authToken,
+    fromNumber,
   });
 
   const snap  = await db.collection('meta').doc('twilioConfig').get();
