@@ -114,14 +114,14 @@ async function compressAndUpload(localUri, storagePath, resizeWidth, quality) {
 
 // ── Public upload helpers ──────────────────────────────────────────────────────
 
-/** Job photos — 1200 px wide, JPEG 0.60 */
+/** Job photos — 1200 px wide, JPEG 0.60, targets < 150 KB */
 export function uploadJobPhoto(localUri, jobId, photoId) {
   const path = `jobs/${jobId}/${photoId}.jpg`;
   console.log('[Storage] uploadJobPhoto →', path);
   return compressAndUpload(localUri, path, 1200, 0.60);
 }
 
-/** Expense photos — 800 px wide, JPEG 0.55 */
+/** Expense photos — 800 px wide, JPEG 0.55, targets < 150 KB */
 export function uploadExpensePhoto(localUri, expenseId, photoId) {
   const path = `expenses/${expenseId}/${photoId}.jpg`;
   console.log('[Storage] uploadExpensePhoto →', path);
@@ -133,56 +133,133 @@ export function uploadPhoto(localUri, storagePath) {
   return compressAndUpload(localUri, storagePath, 1200, 0.60);
 }
 
+/** Company logo — 600 px wide, JPEG 0.85, cache-busted by timestamp so URL changes on re-upload */
+export function uploadCompanyLogo(localUri) {
+  const path = `company/logo_${Date.now()}.jpg`;
+  console.log('[Storage] uploadCompanyLogo →', path);
+  return compressAndUpload(localUri, path, 600, 0.85);
+}
+
 // ── Test helper ────────────────────────────────────────────────────────────────
 
 /**
- * Quick connectivity test — uploads a tiny text file and logs the result.
- * Call this from a dev button to verify Storage is reachable before testing photos.
+ * Runs a connectivity test against Firebase Storage and returns a structured
+ * result object — all results are returned to the caller, nothing logged-only.
+ *
+ * Returns:
+ *   { authenticated, email, bucket, readOk, readError,
+ *     writeOk, writeError, overallOk, failReason }
  */
 export async function testStorageConnection() {
+  const result = {
+    authenticated: false,
+    email: null,
+    bucket: null,
+    readOk: false,
+    readError: null,
+    writeOk: false,
+    writeError: null,
+    overallOk: false,
+    failReason: null,
+  };
+
+  // 1. Auth check
+  const user = auth.currentUser;
+  if (!user) {
+    result.failReason = 'Not authenticated';
+    return result;
+  }
+  result.authenticated = true;
+  result.email = user.email;
+
+  let token;
   try {
-    console.log('[Storage] === testStorageConnection start ===');
-    const token = await auth.currentUser?.getIdToken();
-    if (!token) { console.error('[Storage] test: not authenticated'); return; }
+    token = await user.getIdToken();
+  } catch (err) {
+    result.authenticated = false;
+    result.failReason = 'Could not get auth token: ' + err.message;
+    return result;
+  }
 
-    const bucket = await detectBucket(token);
+  // 2. Bucket detection
+  try {
+    result.bucket = await detectBucket(token);
+  } catch (err) {
+    result.failReason = err.message;
+    return result;
+  }
 
-    // Write a tiny temp file
-    const testFile = FileSystem.cacheDirectory + 'storage_test.txt';
+  // 3. Read test — list up to 1 object
+  try {
+    const listUrl = `https://firebasestorage.googleapis.com/v0/b/${result.bucket}/o?maxResults=1`;
+    const res = await fetch(listUrl, { headers: { Authorization: `Firebase ${token}` } });
+    if (res.ok) {
+      result.readOk = true;
+    } else {
+      result.readError = `HTTP ${res.status}`;
+    }
+  } catch (err) {
+    result.readError = err.message;
+  }
+
+  // 4. Write test — upload a tiny sentinel file
+  const testFile = FileSystem.cacheDirectory + 'storage_test.txt';
+  try {
     await FileSystem.writeAsStringAsync(testFile, 'apollonia-storage-test', {
       encoding: FileSystem.EncodingType.UTF8,
     });
 
     const encodedPath = encodeURIComponent('_test/connection_check.txt');
     const uploadUrl =
-      `https://firebasestorage.googleapis.com/v0/b/${bucket}/o` +
+      `https://firebasestorage.googleapis.com/v0/b/${result.bucket}/o` +
       `?uploadType=media&name=${encodedPath}`;
 
-    const result = await FileSystem.uploadAsync(uploadUrl, testFile, {
+    const uploadResult = await FileSystem.uploadAsync(uploadUrl, testFile, {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
       headers: { Authorization: `Firebase ${token}`, 'Content-Type': 'text/plain' },
     });
 
-    console.log('[Storage] test upload status:', result.status);
-    console.log('[Storage] test upload body:', result.body);
-    FileSystem.deleteAsync(testFile, { idempotent: true }).catch(() => {});
-    console.log('[Storage] === testStorageConnection end ===');
+    if (uploadResult.status === 200) {
+      result.writeOk = true;
+    } else {
+      result.writeError = `HTTP ${uploadResult.status}`;
+    }
   } catch (err) {
-    console.error('[Storage] testStorageConnection error:', err.message);
+    result.writeError = err.message;
+  } finally {
+    FileSystem.deleteAsync(testFile, { idempotent: true }).catch(() => {});
   }
+
+  // 5. Overall verdict
+  result.overallOk = result.readOk && result.writeOk;
+  if (!result.overallOk && !result.failReason) {
+    const reasons = [];
+    if (!result.readOk)  reasons.push('read failed');
+    if (!result.writeOk) reasons.push('write failed');
+    result.failReason = reasons.join(', ');
+  }
+
+  return result;
 }
 
 // ── Delete ─────────────────────────────────────────────────────────────────────
 
+// Returns { ok, error?: string }. `storage/object-not-found` is treated as
+// success (the file is already gone). Real failures return { ok: false, error }
+// so callers can surface them — existing callers that ignore the return value
+// still work unchanged.
 export async function deleteStoragePhoto(storagePath) {
   try {
     await deleteObject(ref(storage, storagePath));
     console.log('[Storage] deleted', storagePath);
+    return { ok: true };
   } catch (err) {
-    if (err?.code !== 'storage/object-not-found') {
-      console.warn('[Storage] delete error:', err?.code, storagePath);
+    if (err?.code === 'storage/object-not-found') {
+      return { ok: true };
     }
+    console.warn('[Storage] delete error:', err?.code, storagePath);
+    return { ok: false, error: err?.message || err?.code || 'unknown error' };
   }
 }
 

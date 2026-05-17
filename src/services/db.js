@@ -1,7 +1,8 @@
 import { db } from '../config/firebase';
 import {
   collection, doc, onSnapshot, setDoc, deleteDoc,
-  getDocs, writeBatch,
+  getDocs, getDoc, writeBatch, runTransaction,
+  query, where,
 } from 'firebase/firestore';
 
 // ── Firestore sanitizer ────────────────────────────────────────────────────────
@@ -40,7 +41,7 @@ export async function getJobs() {
 }
 
 export async function saveJob(job) {
-  await setDoc(doc(db, 'jobs', job.id), sanitize(job));
+  await setDoc(doc(db, 'jobs', job.id), sanitize(job), { merge: true });
 }
 
 export async function deleteJob(id) {
@@ -120,6 +121,56 @@ export async function saveCustomer(customer) {
   await setDoc(doc(db, 'customers', customer.id), sanitize(customer));
 }
 
+// Look up the customer doc by name. Customers collection is small (one doc per
+// customer), so a single full read is fine here.
+async function findCustomerDocByName(customerName) {
+  const snap = await getDocs(collection(db, 'customers'));
+  return snap.docs.find((d) => d.data().name === customerName) || null;
+}
+
+export async function archiveCustomer(customerName) {
+  const custDoc = await findCustomerDocByName(customerName);
+  if (!custDoc) throw new Error('Customer not found');
+
+  // Targeted query — only the jobs that belong to this customer come back.
+  const jobsSnap = await getDocs(
+    query(collection(db, 'jobs'), where('billToName', '==', customerName)),
+  );
+
+  let batch = writeBatch(db);
+  let count = 0;
+  batch.update(custDoc.ref, { archived: true });
+  count++;
+  for (const jd of jobsSnap.docs) {
+    if (count >= 400) { await batch.commit(); batch = writeBatch(db); count = 0; }
+    batch.update(jd.ref, { archivedForCustomer: true });
+    count++;
+  }
+  await batch.commit();
+}
+
+export async function unarchiveCustomer(customerName) {
+  const custDoc = await findCustomerDocByName(customerName);
+  if (!custDoc) throw new Error('Customer not found');
+
+  const jobsSnap = await getDocs(
+    query(collection(db, 'jobs'), where('billToName', '==', customerName)),
+  );
+
+  let batch = writeBatch(db);
+  let count = 0;
+  batch.update(custDoc.ref, { archived: false });
+  count++;
+  for (const jd of jobsSnap.docs) {
+    // Only flip jobs that were actually archived by this flow.
+    if (!jd.data().archivedForCustomer) continue;
+    if (count >= 400) { await batch.commit(); batch = writeBatch(db); count = 0; }
+    batch.update(jd.ref, { archivedForCustomer: false });
+    count++;
+  }
+  await batch.commit();
+}
+
 // ── Bulk import (Settings → import backup) ─────────────────────────────────────
 
 export async function importBackup({ jobs = [], crews = [], expenses = [] }) {
@@ -176,4 +227,152 @@ export async function clearAllData() {
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// ── Job ID sequence ────────────────────────────────────────────────────────────
+
+export async function assignJobId() {
+  const yy = String(new Date().getFullYear()).slice(2);
+  return runTransaction(db, async (tx) => {
+    const seqRef = doc(db, 'meta', 'jobIdSequence');
+    const snap = await tx.get(seqRef);
+    let count;
+    if (!snap.exists() || snap.data().year !== yy) {
+      count = 1;
+    } else {
+      count = (snap.data().count || 0) + 1;
+    }
+    tx.set(seqRef, { year: yy, count });
+    return `${yy}-${String(count).padStart(4, '0')}`;
+  });
+}
+
+export async function backfillJobIds() {
+  const snap = await getDocs(collection(db, 'jobs'));
+  const missing = snap.docs.filter((d) => !d.data().jobId);
+  if (missing.length === 0) return;
+  for (const jobDoc of missing) {
+    try {
+      const newId = await assignJobId();
+      await setDoc(jobDoc.ref, { jobId: newId }, { merge: true });
+    } catch (err) {
+      console.warn('[backfill] Failed to assign jobId:', err.message);
+    }
+  }
+}
+
+// ── App Config — Job Types ─────────────────────────────────────────────────────
+
+export function subscribeJobTypes(callback) {
+  return onSnapshot(doc(db, 'appConfig', 'jobTypes'), (snap) => {
+    callback(snap.exists() ? (snap.data().types || []) : []);
+  }, () => callback([]));
+}
+
+export async function getJobTypes() {
+  const snap = await getDoc(doc(db, 'appConfig', 'jobTypes'));
+  return snap.exists() ? (snap.data().types || []) : [];
+}
+
+export async function saveJobType(jobType) {
+  const types = await getJobTypes();
+  const idx = types.findIndex((t) => t.id === jobType.id);
+  const clean = sanitize(jobType);
+  if (idx >= 0) types[idx] = clean; else types.push(clean);
+  await setDoc(doc(db, 'appConfig', 'jobTypes'), { types });
+}
+
+export async function deleteJobType(id) {
+  const types = await getJobTypes();
+  await setDoc(doc(db, 'appConfig', 'jobTypes'), { types: types.filter((t) => t.id !== id) });
+}
+
+// ── Company Profile ────────────────────────────────────────────────────────────
+
+const COMPANY_PROFILE_DEFAULTS = {
+  companyName:  '',
+  address:      '',
+  phone:        '',
+  billingEmail: '',
+  supportEmail: '',
+  tagline:      '',
+  logoUrl:      '',
+  taxRates: {
+    omaha:       7.0, // 5.5% NE state + 1.5% Omaha city
+    nebraska:    5.5, // rest of Nebraska
+    iowa:        0,
+    missouri:    0,
+    kansas:      0,
+    southDakota: 0,
+  },
+};
+
+export function subscribeCompanyProfile(callback) {
+  return onSnapshot(doc(db, 'meta', 'companyProfile'), (snap) => {
+    const data = snap.exists() ? snap.data() : {};
+    callback({
+      ...COMPANY_PROFILE_DEFAULTS,
+      ...data,
+      taxRates: { ...COMPANY_PROFILE_DEFAULTS.taxRates, ...(data.taxRates || {}) },
+    });
+  }, (err) => {
+    console.error('[db] companyProfile subscription error:', err.code, err.message);
+    callback(COMPANY_PROFILE_DEFAULTS);
+  });
+}
+
+export async function getCompanyProfile() {
+  const snap = await getDoc(doc(db, 'meta', 'companyProfile'));
+  const data = snap.exists() ? snap.data() : {};
+  return {
+    ...COMPANY_PROFILE_DEFAULTS,
+    ...data,
+    taxRates: { ...COMPANY_PROFILE_DEFAULTS.taxRates, ...(data.taxRates || {}) },
+  };
+}
+
+export async function saveCompanyProfile(updates) {
+  await setDoc(doc(db, 'meta', 'companyProfile'), sanitize(updates), { merge: true });
+}
+
+// ── Invoice number sequence — yy-mm-NNN, resets each month ─────────────────────
+
+export async function getNextInvoiceNumber(date = new Date()) {
+  const yy = String(date.getFullYear()).slice(2);
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yearMonth = `${yy}-${mm}`;
+  return runTransaction(db, async (tx) => {
+    const seqRef = doc(db, 'meta', 'invoiceCounter');
+    const snap = await tx.get(seqRef);
+    let count;
+    if (!snap.exists() || snap.data().yearMonth !== yearMonth) {
+      count = 1;
+    } else {
+      count = (snap.data().count || 0) + 1;
+    }
+    tx.set(seqRef, { yearMonth, count });
+    return `${yearMonth}-${String(count).padStart(3, '0')}`;
+  });
+}
+
+// ── Email Config ───────────────────────────────────────────────────────────────
+
+export async function getEmailConfig() {
+  const snap = await getDoc(doc(db, 'meta', 'emailConfig'));
+  return snap.exists() ? snap.data() : null;
+}
+
+export async function saveEmailConfig(updates) {
+  await setDoc(doc(db, 'meta', 'emailConfig'), updates, { merge: true });
+}
+
+// ── Twilio Config ──────────────────────────────────────────────────────────────
+
+export async function getTwilioConfig() {
+  const snap = await getDoc(doc(db, 'meta', 'twilioConfig'));
+  return snap.exists() ? snap.data() : null;
+}
+
+export async function saveTwilioConfig(updates) {
+  await setDoc(doc(db, 'meta', 'twilioConfig'), updates, { merge: true });
 }
