@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
-  ScrollView, TouchableOpacity, RefreshControl, TextInput,
+  ScrollView, TouchableOpacity, RefreshControl, TextInput, ActivityIndicator,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeCustomers, subscribeJobs, getCustomers, getJobs, saveCustomer } from '../services/db';
+import { subscribeCustomers, subscribeJobs, getCustomers, getJobs, saveCustomer, unarchiveCustomer } from '../services/db';
+import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
 
 const PREDEFINED = ['Sam Ward', 'Kathleen Ward', 'Shamrock Roofing Nebraska'];
@@ -16,11 +17,25 @@ function generateId() {
 
 export default function CustomerListScreen() {
   const navigation = useNavigation();
-  const [customersRaw, setCustomersRaw] = useState([]);
-  const [jobs,         setJobs]         = useState([]);
-  const [refreshing,   setRefreshing]   = useState(false);
-  const [search,       setSearch]       = useState('');
+  const [customersRaw,  setCustomersRaw]  = useState([]);
+  const [jobs,          setJobs]          = useState([]);
+  const [refreshing,    setRefreshing]    = useState(false);
+  const [search,        setSearch]        = useState('');
+  const [showArchived,  setShowArchived]  = useState(false);
+  const [restoringName, setRestoringName] = useState(null);
   const seeded = useRef(false);
+
+  const handleRestore = useCallback(async (customerName) => {
+    setRestoringName(customerName);
+    try {
+      await unarchiveCustomer(customerName);
+      logActivity('customer_restored', `Customer ${customerName} was restored`);
+    } catch {
+      // subscription will reflect the current state
+    } finally {
+      setRestoringName(null);
+    }
+  }, []);
 
   // Set up real-time subscriptions
   useEffect(() => {
@@ -80,7 +95,7 @@ export default function CustomerListScreen() {
     setTimeout(() => setRefreshing(false), 600);
   }, []);
 
-  const customers = useMemo(() => {
+  const { activeCustomers, archivedCustomers } = useMemo(() => {
     const customerMap = {};
     for (const c of customersRaw) {
       if (c.name) customerMap[c.name] = c;
@@ -90,21 +105,27 @@ export default function CustomerListScreen() {
       const n = job.billToName?.trim();
       if (n) jobCounts[n] = (jobCounts[n] || 0) + 1;
     }
-    return Object.values(customerMap)
+    const all = Object.values(customerMap)
       .map((c) => ({ ...c, jobCount: jobCounts[c.name] || 0 }))
       .sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      activeCustomers:   all.filter((c) => !c.archived),
+      archivedCustomers: all.filter((c) => c.archived),
+    };
   }, [customersRaw, jobs]);
+
+  const displayList = showArchived ? archivedCustomers : activeCustomers;
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return customers;
-    return customers.filter(
+    if (!q) return displayList;
+    return displayList.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         (c.email || '').toLowerCase().includes(q) ||
         (c.address || '').toLowerCase().includes(q),
     );
-  }, [customers, search]);
+  }, [displayList, search]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -113,8 +134,23 @@ export default function CustomerListScreen() {
           <Ionicons name="chevron-back" size={22} color={colors.primary} />
           <Text style={styles.backText}>Settings</Text>
         </TouchableOpacity>
-        <Text style={styles.navTitle}>Customers</Text>
-        <View style={styles.navRight} />
+        <Text style={styles.navTitle}>{showArchived ? 'Archived' : 'Customers'}</Text>
+        <TouchableOpacity
+          style={styles.navRight}
+          onPress={() => { setShowArchived((v) => !v); setSearch(''); }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Ionicons
+            name={showArchived ? 'people-outline' : 'eye-off-outline'}
+            size={19}
+            color={showArchived ? colors.primary : archivedCustomers.length > 0 ? '#b45309' : colors.textMuted}
+          />
+          {!showArchived && archivedCustomers.length > 0 && (
+            <View style={styles.archiveBadge}>
+              <Text style={styles.archiveBadgeText}>{archivedCustomers.length}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
       <View style={styles.searchWrap}>
@@ -140,21 +176,27 @@ export default function CustomerListScreen() {
       >
         {filtered.length === 0 ? (
           <View style={styles.empty}>
-            <Ionicons name="person-circle-outline" size={52} color={colors.textMuted} />
-            <Text style={styles.emptyTitle}>{search ? 'No matches' : 'No customers yet'}</Text>
+            <Ionicons name={showArchived ? 'eye-off-outline' : 'person-circle-outline'} size={52} color={colors.textMuted} />
+            <Text style={styles.emptyTitle}>
+              {search ? 'No matches' : showArchived ? 'No archived customers' : 'No customers yet'}
+            </Text>
             <Text style={styles.emptySub}>
-              {search ? 'Try a different search term.' : 'Customers are pulled from your job records.'}
+              {search
+                ? 'Try a different search term.'
+                : showArchived
+                  ? 'Hidden customers will appear here.'
+                  : 'Customers are pulled from your job records.'}
             </Text>
           </View>
         ) : (
           filtered.map((c) => (
             <TouchableOpacity
               key={c.id || c.name}
-              style={styles.card}
+              style={[styles.card, c.archived && styles.cardArchived]}
               onPress={() => navigation.navigate('CustomerEdit', { customerName: c.name })}
               activeOpacity={0.75}
             >
-              <View style={styles.avatar}>
+              <View style={[styles.avatar, c.archived && styles.avatarArchived]}>
                 <Text style={styles.avatarText}>{c.name.charAt(0).toUpperCase()}</Text>
               </View>
 
@@ -181,11 +223,30 @@ export default function CustomerListScreen() {
               </View>
 
               <View style={styles.cardRight}>
-                <View style={styles.jobsBadge}>
-                  <Ionicons name="construct-outline" size={11} color={colors.primary} />
-                  <Text style={styles.jobsBadgeText}>{c.jobCount}</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                {c.archived ? (
+                  <TouchableOpacity
+                    style={styles.restoreBtn}
+                    onPress={() => handleRestore(c.name)}
+                    disabled={restoringName === c.name}
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    {restoringName === c.name
+                      ? <ActivityIndicator size="small" color={colors.primary} />
+                      : <>
+                          <Ionicons name="eye-outline" size={13} color={colors.primary} />
+                          <Text style={styles.restoreBtnText}>Restore</Text>
+                        </>
+                    }
+                  </TouchableOpacity>
+                ) : (
+                  <>
+                    <View style={styles.jobsBadge}>
+                      <Ionicons name="construct-outline" size={11} color={colors.primary} />
+                      <Text style={styles.jobsBadgeText}>{c.jobCount}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+                  </>
+                )}
               </View>
             </TouchableOpacity>
           ))
@@ -212,7 +273,7 @@ const styles = StyleSheet.create({
   backBtn: { flexDirection: 'row', alignItems: 'center', gap: 2, width: 80 },
   backText: { fontSize: 16, color: colors.primary, fontWeight: '500' },
   navTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
-  navRight: { width: 80 },
+  navRight: { width: 80, alignItems: 'flex-end', justifyContent: 'center' },
 
   searchWrap: {
     flexDirection: 'row',
@@ -276,4 +337,34 @@ const styles = StyleSheet.create({
   empty: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   emptySub: { fontSize: 13, color: colors.textSecondary, textAlign: 'center' },
+
+  cardArchived: { opacity: 0.72 },
+  avatarArchived: { backgroundColor: '#9ca3af' },
+
+  archiveBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#b45309',
+    borderRadius: 8,
+    minWidth: 16,
+    height: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  archiveBadgeText: { fontSize: 10, fontWeight: '800', color: '#fff' },
+
+  restoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#f0fdf4',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  restoreBtnText: { fontSize: 12, fontWeight: '700', color: colors.primary },
 });

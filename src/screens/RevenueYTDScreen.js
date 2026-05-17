@@ -1,12 +1,31 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
-  ActivityIndicator, TouchableOpacity,
+  ActivityIndicator, TouchableOpacity, RefreshControl,
 } from 'react-native';
-import { subscribeJobs } from '../services/db';
-import { useNavigation } from '@react-navigation/native';
+import { getJobs } from '../services/db';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
+
+// Compares two job arrays on the fields that influence the YTD revenue
+// computation. Used to skip a state update (and therefore a re-render +
+// re-compute) when refocusing the screen returns identical data.
+function jobsRevenueEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i];
+    if (x.id !== y.id) return false;
+    if (x.status !== y.status) return false;
+    if (x.invoiceTotal !== y.invoiceTotal) return false;
+    if (x.invoiceDate !== y.invoiceDate) return false;
+    if (x.targetDate !== y.targetDate) return false;
+    if (x.billToName !== y.billToName) return false;
+    if (x.archivedForCustomer !== y.archivedForCustomer) return false;
+  }
+  return true;
+}
 
 function fmtCurrency(n) {
   if (!n && n !== 0) return '$0';
@@ -21,14 +40,27 @@ export default function RevenueYTDScreen() {
   const navigation = useNavigation();
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const lastJobsRef = useRef([]);
 
-  useEffect(() => {
-    const unsub = subscribeJobs((data) => {
-      setJobs(data);
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+  // Re-fetch every time the screen comes into focus so data is always fresh.
+  // Skip the state update (and downstream recompute) when the new active-jobs
+  // set is identical to what we already had — common when bouncing between tabs.
+  useFocusEffect(
+    useCallback(() => {
+      setLoading(true);
+      getJobs()
+        .then((data) => {
+          const active = data.filter((j) => !j.archivedForCustomer);
+          if (!jobsRevenueEqual(active, lastJobsRef.current)) {
+            lastJobsRef.current = active;
+            setJobs(active);
+          }
+          setLoading(false);
+        })
+        .catch(() => setLoading(false));
+    }, [])
+  );
 
   const year = currentYear();
   const yearStr = String(year);
@@ -36,10 +68,16 @@ export default function RevenueYTDScreen() {
   const paidJobs = jobs.filter((j) => {
     const status = (j.status || '').toLowerCase();
     return (
-      (status === 'invoice paid' || status === 'completed') &&
+      status === 'invoice paid' &&
       (j.invoiceDate || j.targetDate || '').startsWith(yearStr) &&
       j.invoiceTotal != null
     );
+  });
+
+  // Debug log — verify which jobs are being summed
+  console.log(`[RevenueYTD] Total jobs: ${jobs.length} | Paid ${year}: ${paidJobs.length} | Total: $${paidJobs.reduce((s, j) => s + (Number(j.invoiceTotal) || 0), 0)}`);
+  paidJobs.forEach((j) => {
+    console.log(`  ✓ ${j.projectName || 'Untitled'} | status="${j.status}" | invoiceTotal=${j.invoiceTotal} | invoiceDate=${j.invoiceDate} | targetDate=${j.targetDate}`);
   });
 
   const totalRevenue = paidJobs.reduce((s, j) => s + (Number(j.invoiceTotal) || 0), 0);
@@ -63,6 +101,11 @@ export default function RevenueYTDScreen() {
     ? [...top10, { name: 'Other Customers', total: othersTotal, jobCount: othersCount, isOther: true }]
     : top10;
 
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    setTimeout(() => setRefreshing(false), 800);
+  }, []);
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -70,7 +113,9 @@ export default function RevenueYTDScreen() {
           <Ionicons name="chevron-back" size={22} color={colors.textSecondary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Revenue YTD {year}</Text>
-        <View style={{ width: 34 }} />
+        <TouchableOpacity onPress={onRefresh} style={styles.refreshBtn}>
+          <Ionicons name="refresh" size={20} color={colors.primary} />
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -78,7 +123,13 @@ export default function RevenueYTDScreen() {
           <ActivityIndicator size="large" color={colors.primary} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
+          }
+        >
           <View style={styles.summaryCard}>
             <Text style={styles.summaryLabel}>Total Revenue {year}</Text>
             <Text style={styles.summaryValue}>{fmtCurrency(totalRevenue)}</Text>
@@ -141,6 +192,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e5e7eb',
   },
   backBtn: { width: 34, alignItems: 'center' },
+  refreshBtn: { width: 34, alignItems: 'center' },
   headerTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   content: { padding: 16 },

@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Alert, ActivityIndicator,
+  TouchableOpacity, Alert, ActivityIndicator, Platform,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeCrews, subscribeJobs, subscribeExpenses, saveJob, saveExpense } from '../services/db';
+import { subscribeJobs, subscribeExpenses, saveJob, saveExpense } from '../services/db';
+import { useAppData } from '../context/AppDataContext';
 import { logActivity } from '../services/activityLog';
+import { openInMaps } from '../utils/openInMaps';
 import { colors } from '../theme/colors';
 
 // ── Week helpers (Friday → Thursday) ──────────────────────────────────────────
@@ -50,21 +52,20 @@ export default function CrewDetailScreen() {
   const navigation = useNavigation();
   const { crewId } = useRoute().params;
 
-  const [crew, setCrew]         = useState(null);
-  const [jobs, setJobs]         = useState([]);
+  const { crews } = useAppData();
+  const crew = crews.find((c) => c.id === crewId) || null;
+
+  const [jobs,     setJobs]     = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [weekOffset, setWeekOffset] = useState(0);
-  const [paying, setPaying]     = useState(false);
+  const [paying,   setPaying]   = useState(false);
 
   useEffect(() => {
-    const unsubCrews = subscribeCrews((crewList) => {
-      setCrew(crewList.find((c) => c.id === crewId) || null);
-    });
     const unsubJobs = subscribeJobs((jobList) => {
-      setJobs(jobList.filter((j) => j.crewId === crewId));
+      setJobs(jobList.filter((j) => j.crewId === crewId && !j.archivedForCustomer));
     });
     const unsubExp = subscribeExpenses(setExpenses);
-    return () => { unsubCrews(); unsubJobs(); unsubExp(); };
+    return () => { unsubJobs(); unsubExp(); };
   }, [crewId]);
 
   if (!crew) {
@@ -76,31 +77,33 @@ export default function CrewDetailScreen() {
   }
 
   // ── Week data ──
-  const week       = getWeekRange(weekOffset);
-  const weekJobs   = jobs.filter((j) => isInWeek(j.targetDate || j.scheduledDate, week));
-  const allPaid    = weekJobs.length > 0 && weekJobs.every((j) => j.crewPaid);
+  const week     = getWeekRange(weekOffset);
+  const weekJobs = jobs.filter((j) => isInWeek(j.targetDate || j.scheduledDate, week));
 
-  const weekPay = weekJobs.reduce((sum, job) => {
-    const jobPay = expenses
-      .filter((e) => e.jobId === job.id && e.isCrewCost)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-    return sum + jobPay;
-  }, 0);
+  const jobPay = (job) => {
+    if (job.crewCost != null && job.crewCost > 0) return job.crewCost;
+    if (job.crewLeads != null || job.leadDailyRate != null) {
+      const leads   = (job.crewLeads   || 0) * (job.leadDailyRate   || 0);
+      const helpers = (job.crewHelpers || 0) * (job.helperDailyRate || 0);
+      const workers = (job.crewWorkers || 0) * (job.workerDailyRate || 0);
+      const days    = parseFloat(job.estimatedDuration) || 1;
+      return (leads + helpers + workers) * days;
+    }
+    return null;
+  };
 
-  const jobPay = (jobId) =>
-    expenses
-      .filter((e) => e.jobId === jobId && e.isCrewCost)
-      .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const totalCrewCost = weekJobs.reduce((sum, j) => sum + (jobPay(j) ?? 0), 0);
+  const paidCrewCost  = weekJobs.filter((j) => !!j.crewPaidAt).reduce((sum, j) => sum + (jobPay(j) ?? 0), 0);
+  const owedCrewCost  = totalCrewCost - paidCrewCost;
 
   // ── Pay crew ──
   const handlePayCrew = () => {
-    if (weekJobs.length === 0) return;
-    const unpaid = weekJobs.filter((j) => !j.crewPaid);
-    if (unpaid.length === 0) { Alert.alert('Already Paid', 'All jobs this week are already marked as paid.'); return; }
+    const toPay = weekJobs.filter((j) => !j.crewPaidAt);
+    if (toPay.length === 0 || owedCrewCost <= 0) return;
 
     Alert.alert(
-      'Pay Crew',
-      `Mark ${unpaid.length} job${unpaid.length !== 1 ? 's' : ''} as crew-paid for ${formatWeekLabel(week)}?\n\nTotal: ${fmt$(weekPay)}`,
+      `Pay ${crew.name}`,
+      `Pay ${fmt$(owedCrewCost)} for ${toPay.length} job${toPay.length !== 1 ? 's' : ''} in ${formatWeekLabel(week)}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -110,24 +113,26 @@ export default function CrewDetailScreen() {
               setPaying(true);
               const today = new Date().toISOString().slice(0, 10);
               await Promise.all(
-                unpaid.map((j) => saveJob({ ...j, crewPaid: true, crewPaidAt: today })),
+                toPay.map((j) => saveJob({ ...j, crewPaid: true, crewPaidAt: today })),
               );
-              if (weekPay > 0) {
-                const newExp = {
-                  id:          generateId(),
-                  type:        'company',
-                  date:        today,
-                  amount:      weekPay,
-                  category:    'Subcontractors & Labor',
-                  description: `Crew Pay - ${crew.name} - ${formatWeekLabel(week)}`,
-                  isCrewCost:  true,
+              if (owedCrewCost > 0) {
+                await saveExpense({
+                  id:           generateId(),
+                  type:         'company',
+                  date:         today,
+                  amount:       owedCrewCost,
+                  category:     'Subcontractors & Labor',
+                  description:  `Crew Pay - ${crew.name} - ${formatWeekLabel(week)}`,
+                  crewName:     crew.name,
+                  isCrewCost:   true,
                   addToInvoice: false,
-                  createdAt:   today,
-                };
-                await saveExpense(newExp);
+                  createdAt:    today,
+                });
               }
-              logActivity('crew_paid', `Paid crew: ${crew.name} - ${formatWeekLabel(week)} ($${weekPay})`);
-              // subscriptions auto-update UI
+              logActivity(
+                'crew_paid',
+                `Paid ${crew.name} ${fmt$(owedCrewCost)} for ${toPay.length} job${toPay.length !== 1 ? 's' : ''}`,
+              );
             } catch (err) {
               Alert.alert('Error', 'Could not save payment: ' + err.message);
             } finally {
@@ -197,6 +202,7 @@ export default function CrewDetailScreen() {
 
         <SectionTitle title="Pay Crew" />
 
+        {/* Week navigation */}
         <View style={styles.weekNav}>
           <TouchableOpacity onPress={() => setWeekOffset((o) => o - 1)} style={styles.weekArrow}>
             <Ionicons name="chevron-back" size={20} color={colors.primary} />
@@ -211,72 +217,97 @@ export default function CrewDetailScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Job list */}
         <View style={styles.card}>
           {weekJobs.length === 0 ? (
             <Text style={styles.noMembers}>No jobs scheduled this week.</Text>
           ) : (
             weekJobs.map((job, i) => {
-              const pay = jobPay(job.id);
+              const pay    = jobPay(job);
+              const isPaid = !!job.crewPaidAt;
               return (
                 <View key={job.id} style={[styles.jobRow, i > 0 && styles.memberDivider]}>
+                  <Ionicons
+                    name={isPaid ? 'checkmark-circle' : 'close-circle'}
+                    size={20}
+                    color={isPaid ? '#16a34a' : '#dc2626'}
+                    style={{ marginTop: 2 }}
+                  />
                   <View style={{ flex: 1 }}>
+                    {job.jobId ? (
+                      <Text style={styles.jobIdLabel}>Job {job.jobId}</Text>
+                    ) : null}
                     <Text style={styles.jobTitle} numberOfLines={1}>
                       {job.projectName || 'Untitled Job'}
                     </Text>
-                    <Text style={styles.jobDate}>
-                      {job.targetDate || job.scheduledDate || '—'}
+                    <Text style={styles.jobMeta} numberOfLines={1}>
+                      {[job.targetDate, job.billToName].filter(Boolean).join(' · ')}
                     </Text>
-                  </View>
-                  <View style={styles.jobRight}>
-                    <Text style={styles.jobPay}>{pay > 0 ? fmt$(pay) : '—'}</Text>
-                    {job.crewPaid && (
-                      <View style={styles.paidBadge}>
-                        <Text style={styles.paidBadgeText}>Paid</Text>
+                    {job.jobLocationAddress ? (
+                      <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }} onPress={() => openInMaps(job.jobLocationAddress)} activeOpacity={0.7}>
+                        <Text style={[styles.jobMeta, { color: '#2563eb', flex: 1 }]} numberOfLines={1}>{job.jobLocationAddress}</Text>
+                        <Ionicons name="earth-outline" size={13} color="#16a34a" />
+                      </TouchableOpacity>
+                    ) : null}
+                    {job.status ? (
+                      <View style={styles.statusChip}>
+                        <Text style={styles.statusChipText}>{job.status}</Text>
                       </View>
-                    )}
+                    ) : null}
                   </View>
+                  {pay === null ? (
+                    <Text style={styles.jobPayNotSet}>Cost Not Set</Text>
+                  ) : (
+                    <Text style={[styles.jobPay, isPaid ? styles.jobPayPaid : styles.jobPayOwed]}>
+                      {fmt$(pay)}
+                    </Text>
+                  )}
                 </View>
               );
             })
           )}
-
-          {weekJobs.length > 0 && (
-            <>
-              <View style={styles.totalDivider} />
-              <View style={styles.totalRow}>
-                <Text style={styles.totalLabel}>Total crew pay</Text>
-                <Text style={styles.totalAmount}>{fmt$(weekPay)}</Text>
-              </View>
-            </>
-          )}
         </View>
 
+        {/* Three totals */}
         {weekJobs.length > 0 && (
-          weekOffset < 0 ? (
-            allPaid ? (
-              <PaidSummary weekJobs={weekJobs} weekPay={weekPay} />
+          <View style={styles.totalsCard}>
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Total Crew $ All Jobs</Text>
+              <Text style={styles.totalValue}>{fmt$(totalCrewCost)}</Text>
+            </View>
+            <View style={styles.totalDivider} />
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>$ Paid to Crew</Text>
+              <Text style={[styles.totalValue, styles.totalPaid]}>{fmt$(paidCrewCost)}</Text>
+            </View>
+            <View style={styles.totalDivider} />
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabelOwed}>$ Owed to Crew</Text>
+              <Text style={[styles.totalValue, owedCrewCost > 0 ? styles.totalOwed : styles.totalZero]}>
+                {fmt$(owedCrewCost)}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Pay button */}
+        {weekJobs.length > 0 && (
+          <TouchableOpacity
+            style={[styles.payBtn, (owedCrewCost <= 0 || paying) && styles.payBtnDisabled]}
+            onPress={handlePayCrew}
+            disabled={owedCrewCost <= 0 || paying}
+          >
+            {paying ? (
+              <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <View style={styles.notPaidBanner}>
-                <Ionicons name="alert-circle-outline" size={20} color="#dc2626" />
-                <Text style={styles.notPaidText}>Not Paid</Text>
-              </View>
-            )
-          ) : (
-            <TouchableOpacity
-              style={[styles.payBtn, (allPaid || paying) && styles.payBtnDisabled]}
-              onPress={handlePayCrew}
-              disabled={allPaid || paying}
-            >
-              {paying ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <>
-                  <Ionicons name={allPaid ? 'checkmark-circle' : 'cash-outline'} size={18} color="#fff" />
-                  <Text style={styles.payBtnText}>{allPaid ? 'Crew Paid' : 'Pay Crew'}</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          )
+              <>
+                <Ionicons name="cash-outline" size={18} color="#fff" />
+                <Text style={styles.payBtnText}>
+                  {owedCrewCost > 0 ? `Pay Crew ${fmt$(owedCrewCost)}` : 'Pay Crew'}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
         )}
 
         <View style={{ height: 32 }} />
@@ -287,21 +318,6 @@ export default function CrewDetailScreen() {
 
 function SectionTitle({ title }) {
   return <Text style={styles.sectionTitle}>{title}</Text>;
-}
-
-function PaidSummary({ weekJobs, weekPay }) {
-  const paidAt = weekJobs.find((j) => j.crewPaid && j.crewPaidAt)?.crewPaidAt;
-  const dateStr = paidAt
-    ? new Date(paidAt + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-    : null;
-  return (
-    <View style={styles.paidSummaryBox}>
-      <Ionicons name="checkmark-circle" size={22} color="#16a34a" />
-      <Text style={styles.paidSummaryText}>
-        Paid{dateStr ? ` ${dateStr}` : ''}{weekPay > 0 ? `: ${fmt$(weekPay)}` : ''}
-      </Text>
-    </View>
-  );
 }
 
 function InfoRow({ icon, label, value, divider }) {
@@ -377,7 +393,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 14,
     paddingHorizontal: 16,
-    marginBottom: 20,
+    marginBottom: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.07,
@@ -417,18 +433,57 @@ const styles = StyleSheet.create({
   weekArrow: { padding: 6 },
   weekLabel: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
 
-  jobRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, gap: 10 },
-  jobTitle: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
-  jobDate: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
-  jobRight: { alignItems: 'flex-end', gap: 4 },
-  jobPay: { fontSize: 14, fontWeight: '700', color: colors.primary },
-  paidBadge: { backgroundColor: '#dcfce7', borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 },
-  paidBadgeText: { fontSize: 10, fontWeight: '700', color: colors.primary },
+  jobRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+    gap: 10,
+  },
+  jobIdLabel: {
+    fontSize: 10, fontWeight: '600', color: colors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 1,
+  },
+  jobTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  jobMeta:  { fontSize: 11, color: colors.textMuted, marginBottom: 1 },
+  statusChip: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginTop: 4,
+  },
+  statusChipText: { fontSize: 10, fontWeight: '600', color: colors.textSecondary },
+  jobPay:        { fontSize: 13, fontWeight: '700', marginTop: 2 },
+  jobPayPaid:    { color: '#16a34a' },
+  jobPayOwed:    { color: '#dc2626' },
+  jobPayNotSet:  { fontSize: 11, fontWeight: '600', color: '#dc2626', marginTop: 2, textAlign: 'right' },
 
-  totalDivider: { height: 1, backgroundColor: '#e5e7eb', marginTop: 4 },
-  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12 },
-  totalLabel: { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
-  totalAmount: { fontSize: 16, fontWeight: '800', color: colors.primary },
+  totalsCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.07,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  totalDivider: { height: 1, backgroundColor: '#f3f4f6' },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 13,
+  },
+  totalLabel:     { fontSize: 14, fontWeight: '500', color: colors.textPrimary },
+  totalLabelOwed: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  totalValue:     { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  totalPaid:      { color: '#16a34a' },
+  totalOwed:      { color: '#dc2626', fontSize: 16 },
+  totalZero:      { color: colors.textMuted },
 
   payBtn: {
     backgroundColor: colors.primary,
@@ -438,36 +493,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     paddingVertical: 15,
+    marginBottom: 4,
     shadowColor: colors.primary,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.3,
     shadowRadius: 6,
     elevation: 4,
   },
-  payBtnDisabled: { backgroundColor: '#6b7280', shadowOpacity: 0 },
+  payBtnDisabled: { backgroundColor: '#9ca3af', shadowOpacity: 0 },
   payBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-
-  paidSummaryBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: '#f0fdf4',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#bbf7d0',
-  },
-  paidSummaryText: { fontSize: 16, fontWeight: '700', color: '#16a34a' },
-
-  notPaidBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: '#fef2f2',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#fecaca',
-  },
-  notPaidText: { fontSize: 15, fontWeight: '600', color: '#dc2626' },
 });

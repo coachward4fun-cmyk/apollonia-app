@@ -1,4 +1,5 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, Modal, TextInput, KeyboardAvoidingView,
@@ -10,11 +11,13 @@ import { Swipeable } from 'react-native-gesture-handler';
 import * as ImagePicker from 'expo-image-picker';
 import { requestCameraPermission, requestPhotoLibraryPermission } from '../utils/permissions';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeExpenses, subscribeJobs, saveExpense, deleteExpense } from '../services/db';
+import { getExpenses, getJobs, saveExpense, deleteExpense } from '../services/db';
 import { uploadExpensePhoto, expensePhotoPath, deleteStoragePhoto } from '../services/storageService';
+import { SkeletonCard } from '../components/SkeletonLoader';
 import { useAuth } from '../context/AuthContext';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
+import DatePickerField from '../components/DatePickerField';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const THUMB_SIZE = Math.floor((SCREEN_WIDTH - 32 - 12) / 3);
@@ -51,8 +54,11 @@ function generateId() {
 }
 
 function fmt$(n) {
-  if (!n && n !== 0) return '$0';
-  return '$' + Math.round(Number(n)).toLocaleString('en-US');
+  if (!n && n !== 0) return '$0.00';
+  return '$' + Number(n).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function formatDate(str) {
@@ -64,34 +70,53 @@ function formatDate(str) {
 
 // ── Main screen ────────────────────────────────────────────────────────────────
 
+function localDateStr(offsetDays) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export default function ExpensesScreen() {
   const { canWrite } = useAuth();
   const [expenses,        setExpenses]        = useState([]);
   const [jobs,            setJobs]            = useState([]);
   const [filter,          setFilter]          = useState(null);
+  const [timeRange,       setTimeRange]       = useState('last30');
   const [refreshing,      setRefreshing]      = useState(false);
   const [showForm,        setShowForm]        = useState(false);
   const [editingExpense,  setEditingExpense]  = useState(null);
+  const [initialLoading,  setInitialLoading]  = useState(true);
 
-  useEffect(() => {
-    const unsubExp  = subscribeExpenses((data) => {
-      const sorted = [...data].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-      setExpenses(sorted);
-    });
-    const unsubJobs = subscribeJobs(setJobs);
-    return () => { unsubExp(); unsubJobs(); };
+  const loadData = useCallback(async () => {
+    try {
+      const [data, j] = await Promise.all([getExpenses(), getJobs()]);
+      setExpenses([...data].sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+      setJobs(j.filter((job) => !job.archivedForCustomer));
+    } finally {
+      setInitialLoading(false);
+    }
   }, []);
 
-  const onRefresh = useCallback(() => {
+  useFocusEffect(useCallback(() => { loadData(); }, [loadData]));
+
+  const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
-  }, []);
+    await loadData();
+    setRefreshing(false);
+  }, [loadData]);
 
-  const totalAll     = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const totalJob     = expenses.filter((e) => e.type === 'job').reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const totalCompany = expenses.filter((e) => e.type === 'company').reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const yearStr        = String(new Date().getFullYear());
+  const cutoffStr      = localDateStr(-30);
 
-  const displayed = filter ? expenses.filter((e) => e.type === filter) : expenses;
+  const rangeExpenses  = timeRange === 'ytd'
+    ? expenses.filter((e) => (e.date || '').startsWith(yearStr))
+    : expenses.filter((e) => (e.date || '') >= cutoffStr);
+
+  const totalAll     = rangeExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const totalJob     = rangeExpenses.filter((e) => e.type === 'job').reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const totalCompany = rangeExpenses.filter((e) => e.type === 'company').reduce((s, e) => s + (Number(e.amount) || 0), 0);
+
+  const displayed = filter ? rangeExpenses.filter((e) => e.type === filter) : rangeExpenses;
 
   const handleDelete = useCallback(async (expense) => {
     if (!canWrite('expenses')) {
@@ -103,19 +128,28 @@ export default function ExpensesScreen() {
       {
         text: 'Delete', style: 'destructive',
         onPress: async () => {
+          const photoFailures = [];
           try {
             for (const url of (expense.photos || [])) {
               const filename = url.split('/').pop().split('?')[0];
-              await deleteStoragePhoto(expensePhotoPath(expense.id, filename));
+              const result = await deleteStoragePhoto(expensePhotoPath(expense.id, filename));
+              if (result && result.ok === false) photoFailures.push(filename);
             }
             await deleteExpense(expense.id);
+            await loadData();
+            if (photoFailures.length > 0) {
+              Alert.alert(
+                'Expense deleted, photos not removed',
+                `The expense was deleted, but ${photoFailures.length} photo${photoFailures.length === 1 ? '' : 's'} could not be removed from storage. Free space may not have been fully reclaimed.`,
+              );
+            }
           } catch (err) {
             Alert.alert('Error', err.message);
           }
         },
       },
     ]);
-  }, [canWrite]);
+  }, [canWrite, loadData]);
 
   const handleSave = useCallback(async (formData, photoAssets) => {
     if (!canWrite('expenses')) {
@@ -147,12 +181,13 @@ export default function ExpensesScreen() {
       const action = editingExpense ? 'expense_updated' : 'expense_created';
       const label = formData.description || formData.category || 'expense';
       logActivity(action, `${editingExpense ? 'Updated' : 'Created'} expense: ${label} ($${formData.amount || 0})`);
+      await loadData();
       setShowForm(false);
       setEditingExpense(null);
     } catch (err) {
       Alert.alert('Error', 'Could not save expense: ' + err.message);
     }
-  }, [editingExpense, canWrite]);
+  }, [editingExpense, canWrite, loadData]);
 
   const handleEdit = useCallback((expense) => {
     setEditingExpense(expense);
@@ -174,6 +209,21 @@ export default function ExpensesScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
       >
+        <View style={styles.rangeToggle}>
+          <TouchableOpacity
+            style={[styles.rangeBtn, timeRange === 'last30' && styles.rangeBtnActive]}
+            onPress={() => { setTimeRange('last30'); setFilter(null); }}
+          >
+            <Text style={[styles.rangeBtnText, timeRange === 'last30' && styles.rangeBtnTextActive]}>Last 30 Days</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.rangeBtn, timeRange === 'ytd' && styles.rangeBtnActive]}
+            onPress={() => { setTimeRange('ytd'); setFilter(null); }}
+          >
+            <Text style={[styles.rangeBtnText, timeRange === 'ytd' && styles.rangeBtnTextActive]}>YTD</Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.summaryRow}>
           <SummaryCard
             label="Total"
@@ -209,7 +259,11 @@ export default function ExpensesScreen() {
           </View>
         )}
 
-        {displayed.length === 0 ? (
+        {initialLoading ? (
+          <View style={styles.listWrap}>
+            {[0,1,2,3,4].map((i) => <SkeletonCard key={i} />)}
+          </View>
+        ) : displayed.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons name="wallet-outline" size={52} color={colors.textMuted} />
             <Text style={styles.emptyTitle}>No expenses{filter ? ' of this type' : ''}</Text>
@@ -479,7 +533,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
 
   const selectableJobs = jobs.filter((j) => {
     const s = (j.status || '').toLowerCase();
-    return s !== 'invoice paid' && s !== 'completed';
+    return s !== 'invoice paid' && s !== 'cancelled';
   });
 
   const cats = type === 'job' ? JOB_CATEGORIES : COMPANY_CATEGORIES;
@@ -534,17 +588,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
             )}
 
             <FormLabel text="DATE" />
-            <View style={styles.inputCard}>
-              <TextInput
-                style={styles.input}
-                value={date}
-                onChangeText={setDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="numbers-and-punctuation"
-                returnKeyType="next"
-              />
-            </View>
+            <DatePickerField value={date} onChange={setDate} clearable={false} />
 
             <FormLabel text="AMOUNT" />
             <View style={styles.inputCard}>
@@ -739,6 +783,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+
+  rangeToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 10,
+    padding: 3,
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  rangeBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  rangeBtnActive: { backgroundColor: colors.primary },
+  rangeBtnText: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  rangeBtnTextActive: { color: '#fff' },
 
   summaryRow: { flexDirection: 'row', gap: 10, padding: 16, paddingBottom: 8 },
   summaryCard: {

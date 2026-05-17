@@ -19,7 +19,10 @@
         "NSCameraUsageDescription": "Apollonia needs camera access to take job site photos and expense receipts",
         "NSPhotoLibraryUsageDescription": "Apollonia needs photo library access to attach photos to jobs and expenses",
         "NSPhotoLibraryAddUsageDescription": "Apollonia needs access to save photos to your library",
-        "ITSAppUsesNonExemptEncryption": false
+        "NSMicrophoneUsageDescription": "Apollonia Assistant needs microphone access for voice commands",
+        "NSSpeechRecognitionUsageDescription": "Apollonia Assistant uses speech recognition to understand your voice commands",
+        "ITSAppUsesNonExemptEncryption": false,
+        "LSApplicationQueriesSchemes": ["maps"]
       },
       "bundleIdentifier": "com.apolloniaconstruction.app"
     },

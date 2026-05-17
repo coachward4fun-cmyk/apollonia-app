@@ -1,69 +1,95 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   ActivityIndicator, TouchableOpacity,
 } from 'react-native';
-import { subscribeExpenses } from '../services/db';
-import { useNavigation } from '@react-navigation/native';
+import { getExpenses } from '../services/db';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 
+const PAGE_SIZE = 25;
+
 function fmtCurrency(n) {
-  if (!n && n !== 0) return '$0';
-  return '$' + Math.round(Number(n)).toLocaleString('en-US');
+  if (!n && n !== 0) return '$0.00';
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function currentYear() {
   return new Date().getFullYear();
 }
 
-function extractCrewName(description) {
-  // Description format: "Crew Pay - {crew name} - {week label}"
-  if (!description) return 'Unknown Crew';
-  const match = description.match(/^Crew Pay - (.+?) - /);
-  return match ? match[1] : description;
+function extractCrewName(expense) {
+  // 1. Dedicated field (set on new records)
+  if (expense.crewName) return expense.crewName;
+  if (expense.crew)     return expense.crew;
+
+  // 2. Parse description: "Crew Pay - [Crew Name] - May 2 – May 8"
+  //    Take text immediately after "Crew Pay - " up to the next " - "
+  const desc = expense.description || '';
+  const match = desc.match(/^Crew Pay - (.+?) - /);
+  if (match) return match[1];
+
+  // 3. Last resort – return description as-is (no truncation)
+  return desc || 'Unknown Crew';
+}
+
+function getWeekEndingThursday(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d)) return null;
+  const daysToAdd = (4 - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + daysToAdd);
+  return d;
+}
+
+function formatWeekEnding(date) {
+  if (!date) return '—';
+  const yy = String(date.getFullYear()).slice(2);
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yy}/${mm}/${dd}`;
 }
 
 export default function CrewPayYTDScreen() {
   const navigation = useNavigation();
   const [expenses, setExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
 
-  useEffect(() => {
-    const unsub = subscribeExpenses((data) => {
-      setExpenses(data);
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      setLoading(true);
+      getExpenses().then((data) => { setExpenses(data); setLoading(false); }).catch(() => setLoading(false));
+    }, [])
+  );
 
   const year = currentYear();
   const yearStr = String(year);
 
   const crewExpenses = expenses.filter((e) =>
-    e.isCrewCost === true && (e.date || '').startsWith(yearStr)
+    e.isCrewCost === true &&
+    e.type === 'company' &&
+    (e.date || '').startsWith(yearStr)
   );
 
   const totalPay = crewExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
 
-  // Group by crew name
-  const byCrew = {};
-  for (const exp of crewExpenses) {
-    const key = extractCrewName(exp.description);
-    if (!byCrew[key]) byCrew[key] = { name: key, total: 0, paymentCount: 0 };
-    byCrew[key].total += Number(exp.amount) || 0;
-    byCrew[key].paymentCount++;
-  }
+  const rows = crewExpenses
+    .map((e) => ({
+      id: e.id,
+      crewName: extractCrewName(e),
+      weekEnding: getWeekEndingThursday(e.date),
+      amount: Number(e.amount) || 0,
+    }))
+    .sort((a, b) => {
+      const timeDiff = (b.weekEnding?.getTime() ?? 0) - (a.weekEnding?.getTime() ?? 0);
+      if (timeDiff !== 0) return timeDiff;
+      return a.crewName.localeCompare(b.crewName);
+    });
 
-  const sorted = Object.values(byCrew).sort((a, b) => b.total - a.total);
-  const top10 = sorted.slice(0, 10);
-  const others = sorted.slice(10);
-  const othersTotal = others.reduce((s, c) => s + c.total, 0);
-  const othersCount = others.reduce((s, c) => s + c.paymentCount, 0);
-
-  const rows = othersTotal > 0
-    ? [...top10, { name: 'Other Crews', total: othersTotal, paymentCount: othersCount, isOther: true }]
-    : top10;
+  const visibleRows = rows.slice(0, page * PAGE_SIZE);
+  const hasMore = visibleRows.length < rows.length;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -95,31 +121,33 @@ export default function CrewPayYTDScreen() {
           ) : (
             <View style={styles.tableCard}>
               <View style={styles.tableHeader}>
-                <Text style={[styles.tableHeadCell, { flex: 1 }]}>Crew</Text>
-                <Text style={[styles.tableHeadCell, styles.tableRight, { width: 60 }]}>Payments</Text>
+                <Text style={[styles.tableHeadCell, { flex: 1 }]}>Crew Name</Text>
+                <Text style={[styles.tableHeadCell, { width: 84 }]}>Week Ending</Text>
                 <Text style={[styles.tableHeadCell, styles.tableRight, { width: 88 }]}>Total Pay</Text>
               </View>
-              {rows.map((row, i) => (
+
+              {visibleRows.map((row, i) => (
                 <View
-                  key={row.name}
-                  style={[styles.tableRow, row.isOther && styles.tableRowOther, i === rows.length - 1 && styles.tableRowLast]}
+                  key={row.id || i}
+                  style={[styles.tableRow, i === visibleRows.length - 1 && !hasMore && styles.tableRowLast]}
                 >
-                  <Text style={[styles.tableCell, { flex: 1 }, row.isOther && styles.tableCellMuted]} numberOfLines={1}>
-                    {row.name}
+                  <Text style={[styles.tableCell, { flex: 1 }]} numberOfLines={1}>
+                    {row.crewName}
                   </Text>
-                  <Text style={[styles.tableCell, styles.tableRight, { width: 60 }, row.isOther && styles.tableCellMuted]}>
-                    {row.paymentCount}
+                  <Text style={[styles.tableCell, styles.cellWeek, { width: 84 }]} numberOfLines={1}>
+                    {formatWeekEnding(row.weekEnding)}
                   </Text>
                   <Text style={[styles.tableCell, styles.tableRight, styles.tableCellBold, { width: 88 }]}>
-                    {fmtCurrency(row.total)}
+                    {fmtCurrency(row.amount)}
                   </Text>
                 </View>
               ))}
-              <View style={styles.tableTotalRow}>
-                <Text style={[styles.tableTotalCell, { flex: 1 }]}>Total</Text>
-                <Text style={[styles.tableTotalCell, styles.tableRight, { width: 60 }]}>{crewExpenses.length}</Text>
-                <Text style={[styles.tableTotalCell, styles.tableRight, { width: 88 }]}>{fmtCurrency(totalPay)}</Text>
-              </View>
+
+              {hasMore && (
+                <TouchableOpacity style={styles.loadMoreBtn} onPress={() => setPage((p) => p + 1)}>
+                  <Text style={styles.loadMoreText}>Load More</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
 
@@ -147,15 +175,15 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   content: { padding: 16 },
   summaryCard: {
-    backgroundColor: '#1d4ed8',
+    backgroundColor: colors.primary,
     borderRadius: 14,
     padding: 20,
     alignItems: 'center',
     marginBottom: 16,
   },
-  summaryLabel: { fontSize: 13, color: '#bfdbfe', fontWeight: '600' },
+  summaryLabel: { fontSize: 13, color: '#bbf7d0', fontWeight: '600' },
   summaryValue: { fontSize: 36, fontWeight: '800', color: '#fff', marginTop: 4 },
-  summaryMeta: { fontSize: 12, color: '#93c5fd', marginTop: 4 },
+  summaryMeta: { fontSize: 12, color: '#86efac', marginTop: 4 },
   empty: { alignItems: 'center', paddingTop: 60, gap: 12 },
   emptyText: { fontSize: 15, color: colors.textSecondary, textAlign: 'center' },
   tableCard: {
@@ -176,27 +204,25 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
   },
-  tableHeadCell: { fontSize: 11, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  tableHeadCell: { fontSize: 10, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
   tableRight: { textAlign: 'right' },
   tableRow: {
     flexDirection: 'row',
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 11,
     borderBottomWidth: 1,
     borderBottomColor: '#f3f4f6',
+    alignItems: 'center',
   },
   tableRowLast: { borderBottomWidth: 0 },
-  tableRowOther: { backgroundColor: '#fafafa' },
   tableCell: { fontSize: 13, color: colors.textPrimary },
-  tableCellMuted: { color: colors.textSecondary, fontStyle: 'italic' },
+  cellWeek: { fontSize: 12, color: colors.textSecondary },
   tableCellBold: { fontWeight: '700' },
-  tableTotalRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    backgroundColor: '#eff6ff',
-    borderTopWidth: 2,
-    borderTopColor: '#93c5fd',
+  loadMoreBtn: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
   },
-  tableTotalCell: { fontSize: 14, fontWeight: '800', color: '#1d4ed8' },
+  loadMoreText: { fontSize: 14, fontWeight: '600', color: colors.primary },
 });

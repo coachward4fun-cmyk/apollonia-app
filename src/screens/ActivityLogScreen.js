@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
+  View, Text, StyleSheet, SafeAreaView, FlatList,
   ActivityIndicator, TouchableOpacity,
 } from 'react-native';
 import { db } from '../config/firebase';
@@ -15,12 +15,13 @@ import { colors } from '../theme/colors';
 const PAGE_SIZE = 25;
 
 function formatTimestamp(ts) {
-  if (!ts) return '—';
+  if (!ts) return { date: '—', time: '' };
   const d = ts.toDate ? ts.toDate() : new Date(ts);
-  if (isNaN(d)) return '—';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
-    ' ' +
-    d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  if (isNaN(d)) return { date: '—', time: '' };
+  return {
+    date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    time: d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+  };
 }
 
 function formatAction(action) {
@@ -87,58 +88,60 @@ export default function ActivityLogScreen() {
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.primary} />
         </View>
+      ) : entries.length === 0 ? (
+        <View style={styles.center}>
+          <Ionicons name="time-outline" size={52} color={colors.textMuted} />
+          <Text style={styles.emptyText}>No activity recorded yet</Text>
+        </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          {entries.length === 0 ? (
-            <View style={styles.empty}>
-              <Ionicons name="time-outline" size={52} color={colors.textMuted} />
-              <Text style={styles.emptyText}>No activity recorded yet</Text>
-            </View>
-          ) : (
-            <View style={styles.tableCard}>
-              <View style={styles.tableHeader}>
-                <Text style={[styles.tableHeadCell, { width: 120 }]}>Date / Time</Text>
-                <Text style={[styles.tableHeadCell, { width: 68 }]}>User</Text>
-                <Text style={[styles.tableHeadCell, { flex: 1 }]}>Activity</Text>
-              </View>
-              {entries.map((entry, i) => (
-                <View
-                  key={entry.id}
-                  style={[styles.tableRow, i === entries.length - 1 && !hasMore && styles.tableRowLast]}
-                >
-                  <Text style={[styles.tableCell, styles.cellDate, { width: 120 }]} numberOfLines={2}>
-                    {formatTimestamp(entry.timestamp)}
-                  </Text>
-                  <Text style={[styles.tableCell, styles.cellUser, { width: 68 }]} numberOfLines={1}>
+        <View style={[styles.tableCard, { margin: 16, flex: 1 }]}>
+          <View style={styles.tableHeader}>
+            <Text style={[styles.tableHeadCell, { width: 90 }]}>Date / Time</Text>
+            <Text style={[styles.tableHeadCell, { width: 60 }]}>User</Text>
+            <Text style={[styles.tableHeadCell, { flex: 1 }]}>Activity</Text>
+          </View>
+          <FlatList
+            data={entries}
+            keyExtractor={(item) => item.id}
+            windowSize={5}
+            maxToRenderPerBatch={10}
+            initialNumToRender={20}
+            removeClippedSubviews
+            onEndReachedThreshold={0.3}
+            onEndReached={handleLoadMore}
+            ListFooterComponent={
+              loadingMore
+                ? <ActivityIndicator size="small" color={colors.primary} style={{ paddingVertical: 14 }} />
+                : hasMore
+                  ? <TouchableOpacity style={styles.loadMoreBtn} onPress={handleLoadMore}>
+                      <Text style={styles.loadMoreText}>Load More</Text>
+                    </TouchableOpacity>
+                  : <View style={{ height: 8 }} />
+            }
+            renderItem={({ item: entry, index }) => {
+              const ts = formatTimestamp(entry.timestamp);
+              return (
+                <View style={[styles.tableRow, index === entries.length - 1 && !hasMore && styles.tableRowLast]}>
+                  <View style={{ width: 90 }}>
+                    <Text style={[styles.tableCell, styles.cellDate]}>{ts.date}</Text>
+                    {ts.time ? <Text style={[styles.tableCell, styles.cellTime]}>{ts.time}</Text> : null}
+                  </View>
+                  <Text style={[styles.tableCell, styles.cellUser, { width: 60 }]} numberOfLines={1}>
                     {entry.userName || entry.userEmail?.split('@')[0] || '—'}
                   </Text>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.tableCell, styles.cellAction]} numberOfLines={1}>
+                    <Text style={[styles.tableCell, styles.cellAction]}>
                       {formatAction(entry.action)}
                     </Text>
                     {entry.details ? (
-                      <Text style={styles.cellDetails} numberOfLines={2}>{entry.details}</Text>
+                      <Text style={styles.cellDetails} numberOfLines={3}>{entry.details}</Text>
                     ) : null}
                   </View>
                 </View>
-              ))}
-
-              {hasMore && (
-                <TouchableOpacity
-                  style={styles.loadMoreBtn}
-                  onPress={handleLoadMore}
-                  disabled={loadingMore}
-                >
-                  {loadingMore
-                    ? <ActivityIndicator size="small" color={colors.primary} />
-                    : <Text style={styles.loadMoreText}>Load More</Text>}
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
-
-          <View style={{ height: 32 }} />
-        </ScrollView>
+              );
+            }}
+          />
+        </View>
       )}
     </SafeAreaView>
   );
@@ -198,6 +201,7 @@ const styles = StyleSheet.create({
   tableRowLast: { borderBottomWidth: 0 },
   tableCell: { fontSize: 12, color: colors.textPrimary },
   cellDate: { color: colors.textSecondary, lineHeight: 17 },
+  cellTime: { color: colors.textMuted, fontSize: 11, marginTop: 1 },
   cellUser: { fontWeight: '700', color: colors.primary },
   cellAction: { fontWeight: '600', color: colors.textPrimary },
   cellDetails: { fontSize: 11, color: colors.textSecondary, marginTop: 2 },

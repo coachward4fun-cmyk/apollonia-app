@@ -6,8 +6,10 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { getCustomers, getJobs, saveCustomer, saveJob } from '../services/db';
+import { getCustomers, saveCustomer, getJobs, archiveCustomer } from '../services/db';
+import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
+import AddressAutocomplete from '../components/AddressAutocomplete';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -22,6 +24,7 @@ export default function CustomerEditScreen() {
   const [email,       setEmail]       = useState('');
   const [salesperson, setSalesperson] = useState('');
   const [saving,      setSaving]      = useState(false);
+  const [archiving,   setArchiving]   = useState(false);
   const [successMsg,  setSuccessMsg]  = useState('');
   const successOpacity = useRef(new Animated.Value(0)).current;
 
@@ -38,64 +41,52 @@ export default function CustomerEditScreen() {
     let active = true;
     (async () => {
       try {
-        const [customers, jobs] = await Promise.all([getCustomers(), getJobs()]);
-
+        const customers = await getCustomers();
         const saved = customers.find((c) => c.name === customerName);
         if (saved && active) {
           if (saved.address)     setAddress(saved.address);
           if (saved.email)       setEmail(saved.email);
           if (saved.salesperson) setSalesperson(saved.salesperson);
-          return;
-        }
-
-        for (const j of jobs.filter((j) => j.billToName?.trim() === customerName)) {
-          if (active) {
-            if (j.billToAddress) setAddress((prev) => prev || j.billToAddress);
-            if (j.email)         setEmail((prev) => prev || j.email);
-            if (j.salesperson)   setSalesperson((prev) => prev || j.salesperson);
-          }
         }
       } catch {}
     })();
     return () => { active = false; };
   }, [customerName]);
 
-  const doSave = async (trimName, updateJobs) => {
-    setSaving(true);
+  const doArchive = async () => {
+    setArchiving(true);
     try {
-      const customers = await getCustomers();
-      const existing  = customers.find((c) => c.name === customerName);
-      const entry = {
-        id:          existing ? existing.id : generateId(),
-        name:        trimName,
-        address:     address.trim(),
-        email:       email.trim(),
-        salesperson: salesperson.trim(),
-        updatedAt:   new Date().toISOString(),
-      };
-      await saveCustomer(entry);
-
-      if (updateJobs) {
-        const jobs = await getJobs();
-        const toUpdate = jobs.filter(
-          (j) => j.billToName?.trim() === customerName && (j.status || '').toLowerCase() !== 'invoice paid',
-        );
-        await Promise.all(
-          toUpdate.map((j) => saveJob({
-            ...j,
-            billToName:    trimName,
-            billToAddress: address.trim(),
-            email:         email.trim(),
-            salesperson:   salesperson.trim(),
-          })),
-        );
-      }
-
-      showSuccess('Customer saved successfully');
+      await archiveCustomer(customerName);
+      logActivity('customer_hidden', `Customer ${customerName} was hidden`);
+      navigation.goBack();
     } catch (err) {
-      Alert.alert('Error', err.message || 'Could not save changes.');
+      Alert.alert('Error', err.message || 'Could not hide customer.');
     } finally {
-      setSaving(false);
+      setArchiving(false);
+    }
+  };
+
+  const handleArchive = async () => {
+    if (archiving || saving) return;
+    try {
+      const allJobs = await getJobs();
+      const custJobs = allJobs.filter((j) => j.billToName === customerName);
+      const pendingStatuses = new Set(['invoice sent', 'invoice ready']);
+      const hasPending = custJobs.some((j) => pendingStatuses.has((j.status || '').toLowerCase()));
+      if (hasPending) {
+        Alert.alert(
+          'Outstanding Invoices',
+          'This customer has invoices that haven\'t been paid yet. Hiding them will remove all their jobs from all lists.\n\nContinue anyway?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Hide Anyway', style: 'destructive', onPress: doArchive },
+          ],
+        );
+      } else {
+        await doArchive();
+      }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not check jobs.');
     }
   };
 
@@ -105,35 +96,23 @@ export default function CustomerEditScreen() {
       Alert.alert('Error', 'Customer name is required.');
       return;
     }
-
+    setSaving(true);
     try {
-      const jobs = await getJobs();
-      const unpaidCount = jobs.filter(
-        (j) => j.billToName?.trim() === customerName && (j.status || '').toLowerCase() !== 'invoice paid',
-      ).length;
-
-      if (unpaidCount === 0) {
-        await doSave(trimName, false);
-        return;
-      }
-
-      Alert.alert(
-        'Update Customer',
-        `Also update customer details on ${unpaidCount} unpaid job${unpaidCount !== 1 ? 's' : ''}?`,
-        [
-          {
-            text: 'Save Customer Only',
-            onPress: () => doSave(trimName, false),
-          },
-          {
-            text: `Update ${unpaidCount} Job${unpaidCount !== 1 ? 's' : ''}`,
-            onPress: () => doSave(trimName, true),
-          },
-          { text: 'Cancel', style: 'cancel' },
-        ],
-      );
+      const customers = await getCustomers();
+      const existing  = customers.find((c) => c.name === customerName);
+      await saveCustomer({
+        id:          existing ? existing.id : generateId(),
+        name:        trimName,
+        address:     address.trim(),
+        email:       email.trim(),
+        salesperson: salesperson.trim(),
+        updatedAt:   new Date().toISOString(),
+      });
+      showSuccess('Customer updated. Changes apply to future jobs only.');
     } catch (err) {
       Alert.alert('Error', err.message || 'Could not save changes.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -159,11 +138,19 @@ export default function CustomerEditScreen() {
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.infoText}>
-          Saving will update all unpaid jobs linked to this customer name.
+          Changes apply to future jobs only. Existing jobs and invoices keep their original customer data.
         </Text>
 
         <Field label="NAME"        value={name}        onChange={setName}        placeholder="Customer name" />
-        <Field label="ADDRESS"     value={address}     onChange={setAddress}     placeholder="Billing address" />
+        <View style={styles.fieldWrap}>
+          <Text style={styles.fieldLabel}>ADDRESS</Text>
+          <AddressAutocomplete
+            value={address}
+            onChangeText={setAddress}
+            placeholder="Billing address"
+            flat
+          />
+        </View>
         <Field
           label="EMAIL"
           value={email}
@@ -173,6 +160,17 @@ export default function CustomerEditScreen() {
           autoCapitalize="none"
         />
         <Field label="SALESPERSON" value={salesperson} onChange={setSalesperson} placeholder="Salesperson name" />
+
+        <TouchableOpacity
+          style={[styles.archiveBtn, (archiving || saving) && { opacity: 0.5 }]}
+          onPress={handleArchive}
+          disabled={archiving || saving}
+        >
+          {archiving
+            ? <ActivityIndicator size="small" color="#b45309" />
+            : <Ionicons name="eye-off-outline" size={16} color="#b45309" />}
+          <Text style={styles.archiveBtnText}>{archiving ? 'Hiding…' : 'Hide Customer'}</Text>
+        </TouchableOpacity>
 
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -265,5 +263,23 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: colors.textPrimary,
     paddingVertical: 2,
+  },
+
+  archiveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#fcd34d',
+    backgroundColor: '#fffbeb',
+  },
+  archiveBtnText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#b45309',
   },
 });

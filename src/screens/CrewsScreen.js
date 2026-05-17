@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   ScrollView, TouchableOpacity, RefreshControl,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeCrews, subscribeJobs } from '../services/db';
+import { useAppData } from '../context/AppDataContext';
 import { colors } from '../theme/colors';
 
 function getCurrentWeekFriday() {
@@ -38,18 +38,12 @@ function formatShortDate(str) {
 
 export default function CrewsScreen() {
   const navigation = useNavigation();
-  const [crews, setCrews] = useState([]);
-  const [jobs,  setJobs]  = useState([]);
-  const [paidMap, setPaidMap] = useState({});
+  const { crews, activeJobs: jobs } = useAppData();
   const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    const unsubCrews = subscribeCrews(setCrews);
-    const unsubJobs  = subscribeJobs(setJobs);
-    return () => { unsubCrews(); unsubJobs(); };
-  }, []);
-
-  useEffect(() => {
+  // Derived: per-crew "most recent paid" date. Recomputes only when crews or
+  // jobs actually change (the context references are stable across renders).
+  const paidMap = useMemo(() => {
     const map = {};
     for (const crew of crews) {
       const paidJobs = jobs.filter(
@@ -59,12 +53,14 @@ export default function CrewsScreen() {
         ? null
         : paidJobs.reduce((latest, j) => (j.crewPaidAt > latest ? j.crewPaidAt : latest), '');
     }
-    setPaidMap(map);
+    return map;
   }, [crews, jobs]);
 
+  // Pull-to-refresh is now a visual confirmation — context subscriptions are
+  // already live, so the data is current. The brief spinner reassures the user.
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
+    setTimeout(() => setRefreshing(false), 500);
   }, []);
 
   const openDetail = (crew) => navigation.navigate('CrewDetail', { crewId: crew.id });

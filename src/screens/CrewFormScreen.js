@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getCrews, saveCrew, deleteCrew } from '../services/db';
 import { useAuth } from '../context/AuthContext';
 import { colors } from '../theme/colors';
+import { normalizePhone, formatPhoneDisplay } from '../utils/phoneUtils';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -34,9 +35,13 @@ export default function CrewFormScreen() {
       const crew  = crews.find((c) => c.id === crewId);
       if (crew) {
         setCrewName(crew.name || '');
-        setLead({ ...EMPTY_LEAD, ...(crew.lead || {}) });
+        setLead({
+          ...EMPTY_LEAD,
+          ...(crew.lead || {}),
+          mobile: formatPhoneDisplay(crew.lead?.mobile || ''),
+        });
         setMembers((crew.members || []).length > 0
-          ? crew.members.map((m) => ({ ...EMPTY_MEMBER, ...m }))
+          ? crew.members.map((m) => ({ ...EMPTY_MEMBER, ...m, mobile: formatPhoneDisplay(m.mobile || '') }))
           : [{ ...EMPTY_MEMBER }]);
       }
     } catch { /* ignore */ }
@@ -69,13 +74,13 @@ export default function CrewFormScreen() {
         name:    crewName.trim(),
         lead:    {
           name:    lead.name.trim(),
-          mobile:  lead.mobile.trim(),
+          mobile:  normalizePhone(lead.mobile) || '',
           email:   lead.email.trim(),
           comment: lead.comment.trim(),
         },
         members: cleanMembers.map((m) => ({
           name:    m.name.trim(),
-          mobile:  m.mobile.trim(),
+          mobile:  normalizePhone(m.mobile) || '',
           comment: m.comment.trim(),
         })),
       };
