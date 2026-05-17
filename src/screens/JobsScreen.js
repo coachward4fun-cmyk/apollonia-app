@@ -1,19 +1,24 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   SafeAreaView,
   ScrollView,
+  FlatList,
   RefreshControl,
   TouchableOpacity,
   TextInput,
-  Linking,
+  Platform,
 } from 'react-native';
-import { subscribeJobs, subscribeCrews } from '../services/db';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
+import { statusStyle } from '../theme/statusColors';
+import { useAppData } from '../context/AppDataContext';
+import { SkeletonCard } from '../components/SkeletonLoader';
+
+const PAGE_SIZE = 25;
 
 const FILTERS = ['All', 'Not Scheduled', 'Scheduled', 'Invoice Ready', 'Invoice Sent', 'Paid'];
 
@@ -23,35 +28,33 @@ function normalizeFilter(f) {
   if (lf === 'all') return 'All';
   if (lf === 'not scheduled') return 'Not Scheduled';
   if (lf === 'scheduled') return 'Scheduled';
+  if (lf === 'scheduled with crew' || lf === 'scheduled / with crew') return 'Scheduled With Crew';
+  if (lf === 'scheduled no crew'   || lf === 'scheduled / no crew' || lf === 'sched / no crew' || lf === 'unassigned') return 'Scheduled No Crew';
   if (lf === 'invoice ready') return 'Invoice Ready';
   if (lf === 'invoice sent') return 'Invoice Sent';
-  if (lf === 'invoice paid' || lf === 'paid' || lf === 'completed') return 'Paid';
+  if (lf === 'invoice paid' || lf === 'paid') return 'Paid';
+  if (lf === 'invoice needed') return 'Invoice Needed';
   return 'All';
 }
 
-const STATUS_COLORS = {
-  'not scheduled':  { bg: '#f3f4f6', fg: '#6b7280' },
-  'scheduled':      { bg: '#dbeafe', fg: '#2563eb' },
-  'in progress':    { bg: '#dcfce7', fg: colors.primary },
-  'invoice ready':  { bg: '#dbeafe', fg: '#2563eb' },
-  'invoice sent':   { bg: '#fef3c7', fg: '#d97706' },
-  'invoice paid':   { bg: '#dcfce7', fg: colors.primary },
-  'completed':      { bg: '#f3f4f6', fg: '#6b7280' },
-};
-
-function statusStyle(status) {
-  return STATUS_COLORS[(status || '').toLowerCase()] || { bg: '#f3f4f6', fg: '#6b7280' };
-}
 
 function jobMatchesFilter(job, filter) {
   const status  = (job.status || '').toLowerCase();
   const hasDate = !!(job.targetDate || job.scheduledDate);
+  const hasCrew = !!job.crewId;
   if (filter === 'All') return true;
-  if (filter === 'Not Scheduled') return !hasDate || status === 'not scheduled';
-  if (filter === 'Scheduled') return hasDate && status !== 'not scheduled';
+  if (filter === 'Not Scheduled')        return !hasDate || status === 'not scheduled';
+  if (filter === 'Scheduled')            return status === 'scheduled' && hasDate;
+  if (filter === 'Scheduled With Crew')  return hasDate && status !== 'not scheduled' && hasCrew;
+  if (filter === 'Scheduled No Crew')    return hasDate && status !== 'not scheduled' && !hasCrew;
   if (filter === 'Invoice Ready') return status === 'invoice ready';
-  if (filter === 'Invoice Sent') return status === 'invoice sent';
-  if (filter === 'Paid') return status === 'invoice paid' || status === 'completed';
+  if (filter === 'Invoice Sent')  return status === 'invoice sent';
+  if (filter === 'Paid')          return status === 'invoice paid';
+  if (filter === 'Invoice Needed') {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const excluded = new Set(['cancelled', 'invoice paid', 'invoice sent', 'invoice ready']);
+    return !!job.targetDate && job.targetDate <= todayStr && !excluded.has(status);
+  }
   return true;
 }
 
@@ -62,11 +65,16 @@ function formatDate(dateStr) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-function openMapAddress(address) {
-  const encoded = encodeURIComponent(address);
-  Linking.openURL(`maps://maps.apple.com/?q=${encoded}`).catch(() => {
-    Linking.openURL(`https://maps.apple.com/?q=${encoded}`).catch(() => {});
-  });
+function calcCrewPay(job) {
+  if (job.leadDailyRate == null && job.helperDailyRate == null && job.workerDailyRate == null) return null;
+  const leads   = (job.crewLeads   || 0) * (job.leadDailyRate   || 0);
+  const helpers = (job.crewHelpers || 0) * (job.helperDailyRate || 0);
+  const workers = (job.crewWorkers || 0) * (job.workerDailyRate || 0);
+  return (leads + helpers + workers) * (parseFloat(job.estimatedDuration) || 1);
+}
+
+function fmtPay(n) {
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function getMonthLabel(monthKey) {
@@ -79,48 +87,82 @@ function getMonthLabel(monthKey) {
 export default function JobsScreen() {
   const navigation = useNavigation();
   const route      = useRoute();
+  const { activeJobs: jobs, crews, jobsLoading: loading } = useAppData();
 
-  const [jobs,       setJobs]       = useState([]);
-  const [crews,      setCrews]      = useState([]);
   const [filter,     setFilter]     = useState('All');
   const [search,     setSearch]     = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [monthFilter, setMonthFilter] = useState(null);
   const [dateFilter,  setDateFilter]  = useState(null);
+  const [weekFilter,  setWeekFilter]  = useState(null); // { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD' }
+  const [crewPayFilter, setCrewPayFilter] = useState(null); // null | 'paid' | 'unpaid'
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE); // kept for load-more footer
 
-  // Real-time Firestore subscriptions
+  // Apply filter from navigation params.
+  // Behavior contract: ANY incoming nav param is treated as an atomic "reset
+  // everything, then apply the new ones" — so a Dashboard tap always lands the
+  // user on a clean view filtered only by what was tapped.
   useEffect(() => {
-    const unsubJobs  = subscribeJobs((data) => setJobs(data));
-    const unsubCrews = subscribeCrews((data) => setCrews(data));
-    return () => { unsubJobs(); unsubCrews(); };
-  }, []);
+    const p = route.params || {};
+    const hasIncoming =
+      p.clearFilters != null ||
+      p.filter       != null ||
+      p.month        != null ||
+      p.date         != null ||
+      p.weekStart    != null ||
+      p.weekEnd      != null ||
+      p.crewPay      != null;
+    if (!hasIncoming) return;
 
-  // Apply filter from navigation params
+    setFilter(p.filter ? normalizeFilter(p.filter) : 'All');
+    setDateFilter(p.date || null);
+    setMonthFilter(p.month || null);
+    setWeekFilter((p.weekStart && p.weekEnd) ? { start: p.weekStart, end: p.weekEnd } : null);
+    setCrewPayFilter(p.crewPay || null);
+    setSearch('');
+
+    navigation.setParams({
+      clearFilters: null,
+      filter:       null,
+      month:        null,
+      date:         null,
+      weekStart:    null,
+      weekEnd:      null,
+      crewPay:      null,
+    });
+  }, [
+    route.params?.clearFilters,
+    route.params?.filter,
+    route.params?.month,
+    route.params?.date,
+    route.params?.weekStart,
+    route.params?.weekEnd,
+    route.params?.crewPay,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset pagination when filters change
   useEffect(() => {
-    const incoming      = route.params?.filter;
-    const incomingMonth = route.params?.month;
-    const incomingDate  = route.params?.date;
-    if (incoming != null) {
-      setFilter(normalizeFilter(incoming));
-      navigation.setParams({ filter: null });
-    }
-    if (incomingMonth !== undefined && incomingMonth !== null) {
-      setMonthFilter(incomingMonth || null);
-      setDateFilter(null);
-      if (incoming == null) setFilter('All');
-      navigation.setParams({ month: null });
-    }
-    if (incomingDate) {
-      setDateFilter(incomingDate);
-      setMonthFilter(null);
-      if (incoming == null) setFilter('All');
-      navigation.setParams({ date: null });
-    }
-  }, [route.params?.filter, route.params?.month, route.params?.date]); // eslint-disable-line react-hooks/exhaustive-deps
+    setVisibleCount(PAGE_SIZE);
+  }, [filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter]);
 
+  // Pull-to-refresh is a visual acknowledgement only — the jobs subscription
+  // in AppDataContext is already live, so data is current. A short spinner
+  // confirms the gesture without holding the list mid-flicker.
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 600);
+    setTimeout(() => setRefreshing(false), 300);
+  }, []);
+
+  // Status filter chip tap = atomic reset of all other filters + apply the new
+  // status. Matches the Dashboard-tap contract so the chips always give a
+  // clean filtered view with no leftover date / week / crew-pay / search.
+  const selectStatusFilter = useCallback((next) => {
+    setFilter(next);
+    setDateFilter(null);
+    setMonthFilter(null);
+    setWeekFilter(null);
+    setCrewPayFilter(null);
+    setSearch('');
   }, []);
 
   const crewInfo = useCallback((crewId) => {
@@ -131,16 +173,23 @@ export default function JobsScreen() {
     return { name: c.name, count: leadCount + memberCount };
   }, [crews]);
 
-  const sorted = [...jobs].sort((a, b) => {
+  const sorted = useMemo(() => [...jobs].sort((a, b) => {
     if (!a.targetDate && !b.targetDate) return 0;
     if (!a.targetDate) return 1;
     if (!b.targetDate) return -1;
     return b.targetDate.localeCompare(a.targetDate);
-  });
+  }), [jobs]);
 
-  const filtered = sorted.filter((job) => {
+  const filtered = useMemo(() => sorted.filter((job) => {
+    // archivedForCustomer already filtered upstream via context's activeJobs
+    if (weekFilter) {
+      const d = job.targetDate || job.scheduledDate;
+      if (!d || d < weekFilter.start || d > weekFilter.end) return false;
+    }
     if (dateFilter && job.targetDate !== dateFilter) return false;
     if (monthFilter && !(job.targetDate || '').startsWith(monthFilter)) return false;
+    if (crewPayFilter === 'paid'   && !job.crewPaidAt) return false;
+    if (crewPayFilter === 'unpaid' && (!job.crewId || job.crewPaidAt)) return false;
     if (!jobMatchesFilter(job, filter)) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -152,7 +201,7 @@ export default function JobsScreen() {
       );
     }
     return true;
-  });
+  }), [sorted, filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -192,7 +241,7 @@ export default function JobsScreen() {
       {/* Filter tabs */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar} contentContainerStyle={styles.filterContent}>
         {FILTERS.map((f) => (
-          <TouchableOpacity key={f} style={[styles.filterTab, filter === f && styles.filterTabActive]} onPress={() => setFilter(f)}>
+          <TouchableOpacity key={f} style={[styles.filterTab, filter === f && styles.filterTabActive]} onPress={() => selectStatusFilter(f)}>
             <Text style={[styles.filterTabText, filter === f && styles.filterTabTextActive]}>{f}</Text>
           </TouchableOpacity>
         ))}
@@ -220,45 +269,121 @@ export default function JobsScreen() {
         </View>
       ) : null}
 
-      {/* List */}
-      <ScrollView
-        contentContainerStyle={styles.listContent}
-        showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
-      >
-        {filtered.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Ionicons name="briefcase-outline" size={52} color={colors.textMuted} />
-            <Text style={styles.emptyTitle}>No jobs found</Text>
-            <Text style={styles.emptySub}>
-              {jobs.length === 0
-                ? 'Import a backup in the Admin tab to load your jobs.'
-                : 'Try a different filter or search term.'}
-            </Text>
-          </View>
-        ) : (
-          filtered.map((job) => {
-            const sc      = statusStyle(job.status);
-            const info    = crewInfo(job.crewId);
-            const dateStr = job.targetDate || job.scheduledDate;
-            const hasDate = !!dateStr;
+      {/* Week filter banner */}
+      {weekFilter ? (
+        <View style={styles.dateFilterBanner}>
+          <Ionicons name="calendar" size={13} color="#2563eb" />
+          <Text style={styles.dateFilterText}>{weekFilter.start} – {weekFilter.end}</Text>
+          <TouchableOpacity onPress={() => setWeekFilter(null)}>
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
+      {/* Invoice Needed filter banner */}
+      {filter === 'Invoice Needed' ? (
+        <View style={styles.dateFilterBanner}>
+          <Ionicons name="alert-circle" size={13} color="#7c3aed" />
+          <Text style={[styles.dateFilterText, { color: '#7c3aed' }]}>Invoice Needed — past target date, not invoiced</Text>
+          <TouchableOpacity onPress={() => setFilter('All')}>
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {/* Scheduled With/No Crew banner (hidden filters from Dashboard pipeline boxes) */}
+      {filter === 'Scheduled With Crew' ? (
+        <View style={styles.dateFilterBanner}>
+          <Ionicons name="people" size={13} color={colors.primary} />
+          <Text style={[styles.dateFilterText, { color: colors.primary }]}>Scheduled — crew assigned</Text>
+          <TouchableOpacity onPress={() => setFilter('All')}>
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {filter === 'Scheduled No Crew' ? (
+        <View style={styles.dateFilterBanner}>
+          <Ionicons name="alert-circle" size={13} color="#d97706" />
+          <Text style={[styles.dateFilterText, { color: '#d97706' }]}>Scheduled — no crew assigned</Text>
+          <TouchableOpacity onPress={() => setFilter('All')}>
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {/* Crew pay filter banner */}
+      {crewPayFilter ? (
+        <View style={styles.dateFilterBanner}>
+          <Ionicons name="cash-outline" size={13} color={crewPayFilter === 'paid' ? colors.primary : '#d97706'} />
+          <Text style={[styles.dateFilterText, { color: crewPayFilter === 'paid' ? colors.primary : '#d97706' }]}>
+            {crewPayFilter === 'paid' ? 'Crew already paid' : 'Crew not yet paid'}
+          </Text>
+          <TouchableOpacity onPress={() => setCrewPayFilter(null)}>
+            <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      {/* List */}
+      {loading ? (
+        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+          {[0,1,2,3,4].map((i) => <SkeletonCard key={i} />)}
+        </ScrollView>
+      ) : (
+        <FlatList
+          data={filtered.slice(0, visibleCount)}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />}
+          windowSize={5}
+          maxToRenderPerBatch={10}
+          initialNumToRender={PAGE_SIZE}
+          removeClippedSubviews
+          onEndReachedThreshold={0.4}
+          onEndReached={() => setVisibleCount((c) => c + PAGE_SIZE)}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="briefcase-outline" size={52} color={colors.textMuted} />
+              <Text style={styles.emptyTitle}>No jobs found</Text>
+              <Text style={styles.emptySub}>
+                {jobs.length === 0
+                  ? 'Import a backup in the Admin tab to load your jobs.'
+                  : 'Try a different filter or search term.'}
+              </Text>
+            </View>
+          }
+          ListFooterComponent={<View style={{ height: 16 }} />}
+          renderItem={({ item: job }) => {
+            const sc       = statusStyle(job.status);
+            const info     = crewInfo(job.crewId);
+            const dateStr  = job.targetDate || job.scheduledDate;
+            const hasDate  = !!dateStr;
+            const crewPay  = info ? calcCrewPay(job) : null;
+            const crewPaid = !!job.crewPaidAt;
+            const crewColor = info ? (crewPaid ? '#16a34a' : '#dc2626') : '#dc2626';
+            const hasPhotos = (job.photoCount > 0) || (job.photos && job.photos.length > 0);
             return (
-              <View key={job.id} style={styles.card}>
+              <View style={styles.card}>
                 <View style={styles.cardTop}>
-                  <Text style={styles.jobTitle} numberOfLines={2}>{job.projectName || 'Untitled Job'}</Text>
-                  <View style={styles.cardTopRight}>
-                    <View style={[styles.statusBadge, { backgroundColor: sc.bg }]}>
-                      <Text style={[styles.statusText, { color: sc.fg }]}>{job.status || 'Active'}</Text>
+                  <View style={styles.cardHeaderRow}>
+                    {job.jobId ? (
+                      <Text style={styles.jobIdLabel}>Job {job.jobId}</Text>
+                    ) : null}
+                    <View style={styles.cardTopRight}>
+                      <View style={[styles.statusBadge, { backgroundColor: sc.bg }]}>
+                        <Text style={[styles.statusText, { color: sc.fg }]}>{job.status || 'Active'}</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.editBtn}
+                        onPress={() => navigation.navigate('JobForm', { jobId: job.id })}
+                        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      >
+                        <Ionicons name="pencil-outline" size={14} color={colors.textMuted} />
+                      </TouchableOpacity>
                     </View>
-                    <TouchableOpacity
-                      style={styles.editBtn}
-                      onPress={() => navigation.navigate('JobForm', { jobId: job.id })}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                    >
-                      <Ionicons name="pencil-outline" size={14} color={colors.textMuted} />
-                    </TouchableOpacity>
                   </View>
+                  <Text style={styles.jobTitle} numberOfLines={2}>{job.projectName || 'Untitled Job'}</Text>
                 </View>
 
                 {job.jobType ? (
@@ -275,10 +400,10 @@ export default function JobsScreen() {
                 ) : null}
 
                 {job.jobLocationAddress ? (
-                  <TouchableOpacity style={styles.metaRow} onPress={() => openMapAddress(job.jobLocationAddress)} activeOpacity={0.7}>
+                  <View style={styles.metaRow}>
                     <Ionicons name="location-outline" size={13} color="#2563eb" />
-                    <Text style={[styles.metaText, styles.linkText]} numberOfLines={1}>{job.jobLocationAddress}</Text>
-                  </TouchableOpacity>
+                    <Text style={styles.metaText} numberOfLines={1}>{job.jobLocationAddress}</Text>
+                  </View>
                 ) : null}
 
                 <View style={styles.divider} />
@@ -299,16 +424,28 @@ export default function JobsScreen() {
                     <Ionicons
                       name={info ? 'people-outline' : 'people-circle-outline'}
                       size={13}
-                      color={info ? '#16a34a' : '#dc2626'}
+                      color={crewColor}
                     />
                     {info ? (
-                      <Text style={[styles.metaText, { color: '#16a34a', fontWeight: '600' }]}>
-                        {info.name} ({info.count})
-                      </Text>
+                      <>
+                        <Text style={[styles.metaText, { color: crewColor, fontWeight: '600' }]} numberOfLines={1}>
+                          {info.name} ({info.count})
+                        </Text>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: crewPay == null ? '#dc2626' : crewColor, marginLeft: 2 }}>
+                          · {fmtPay(crewPay ?? 0)}{crewPaid ? ' (Paid)' : ''}
+                        </Text>
+                      </>
                     ) : (
                       <Text style={[styles.metaText, { color: '#dc2626', fontWeight: '600' }]}>
                         No Crew Assigned
                       </Text>
+                    )}
+                  </View>
+
+                  <View style={styles.photosBadge}>
+                    <Ionicons name="camera-outline" size={12} color={hasPhotos ? colors.textMuted : '#dc2626'} />
+                    {hasPhotos && (
+                      <Text style={styles.photosBadgeText}>{job.photoCount ?? job.photos.length}</Text>
                     )}
                   </View>
 
@@ -325,10 +462,9 @@ export default function JobsScreen() {
                 </View>
               </View>
             );
-          })
-        )}
-        <View style={{ height: 16 }} />
-      </ScrollView>
+          }}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -403,9 +539,15 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6, gap: 8 },
+  cardTop: { marginBottom: 6 },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 2 },
   cardTopRight: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
-  jobTitle: { flex: 1, fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  jobIdLabel: {
+    fontSize: 10, fontWeight: '600', color: colors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 2,
+  },
+  jobTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
   statusBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 0 },
   statusText: { fontSize: 11, fontWeight: '700' },
   editBtn: {
@@ -434,9 +576,15 @@ const styles = StyleSheet.create({
   invoiceTotal: { marginLeft: 'auto', fontSize: 14, fontWeight: '700', color: colors.primary },
   invoiceTotalLink: { textDecorationLine: 'underline' },
 
+  photosBadge: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  photosBadgeText: { fontSize: 11, color: colors.textMuted, fontWeight: '500' },
+
   emptyState: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   emptySub: { fontSize: 13, color: colors.textSecondary, textAlign: 'center', maxWidth: 270 },
+
+  loadMoreBtn: { alignItems: 'center', paddingVertical: 16 },
+  loadMoreText: { fontSize: 14, fontWeight: '600', color: colors.primary },
 
   monthFilterBanner: {
     flexDirection: 'row',

@@ -11,6 +11,7 @@ import CrewsNavigator from './CrewsNavigator';
 import ExpensesScreen from '../screens/ExpensesScreen';
 import SettingsNavigator from './SettingsNavigator';
 import { colors } from '../theme/colors';
+import { navigationRef } from '../utils/navigationRef';
 
 const Tab = createBottomTabNavigator();
 
@@ -58,7 +59,19 @@ function AppTabs() {
       })}
     >
       <Tab.Screen name="Dashboard" component={DashboardScreen} />
-      <Tab.Screen name="Jobs"       component={JobsNavigator}   />
+      <Tab.Screen
+        name="Jobs"
+        component={JobsNavigator}
+        listeners={({ navigation }) => ({
+          tabPress: (e) => {
+            e.preventDefault();
+            navigation.navigate('Jobs', {
+              screen: 'JobsList',
+              params: { clearFilters: Date.now() },
+            });
+          },
+        })}
+      />
       <Tab.Screen name="Invoice"    component={InvoiceScreen}   />
       <Tab.Screen name="Crews"      component={CrewsNavigator}  />
       <Tab.Screen name="Expenses"   component={ExpensesScreen}  />
@@ -69,7 +82,7 @@ function AppTabs() {
 
 export default function AppNavigator() {
   return (
-    <NavigationContainer>
+    <NavigationContainer ref={navigationRef}>
       <AppTabs />
     </NavigationContainer>
   );

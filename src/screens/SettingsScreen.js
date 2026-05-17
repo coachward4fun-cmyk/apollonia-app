@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Modal,
+  TextInput,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
@@ -17,14 +18,20 @@ import * as Sharing from 'expo-sharing';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  subscribeJobs, subscribeCrews, subscribeExpenses, subscribeCustomers,
-  importBackup, deleteJob, deleteExpense, saveJob,
+  getJobs, getCrews, getExpenses, getCustomers,
+  importBackup, deleteJob, deleteExpense, saveJob, saveEmailConfig,
+  getTwilioConfig, saveTwilioConfig,
 } from '../services/db';
+import { invalidateSMSConfig, sendSMS, getTwilioConfig as getSMSConfig } from '../utils/sendSMS';
+import { useAppData } from '../context/AppDataContext';
 import { deleteStoragePhoto, jobPhotoPath, expensePhotoPath, testStorageConnection } from '../services/storageService';
+import { SkeletonCard } from '../components/SkeletonLoader';
+import { logActivity } from '../services/activityLog';
 import { useAuth } from '../context/AuthContext';
 import { colors } from '../theme/colors';
 import { useBuildExpiry, formatExpiryDate, calcDaysLeft, daysColor } from '../hooks/useBuildExpiry';
 import { auth, storage } from '../config/firebase';
+import { ref, listAll, getMetadata } from 'firebase/storage';
 
 const BUILD_COUNT_KEY = 'apollonia:build_count';
 
@@ -89,29 +96,26 @@ function jsonBytes(arr) {
 
 function formatSize(bytes) {
   if (bytes == null || bytes === 0) return '0 KB';
-  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
   return Math.max(1, Math.round(bytes / 1024)) + ' KB';
 }
 
 async function fetchPhotoStorageBytes() {
-  const token = await auth.currentUser?.getIdToken();
-  if (!token) return null;
-  const bucket = storage.app.options.storageBucket;
   let totalBytes = 0;
-  for (const prefix of ['jobs%2F', 'expenses%2F']) {
-    let pageToken = null;
-    do {
-      const url =
-        `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?prefix=${prefix}&maxResults=1000` +
-        (pageToken ? `&pageToken=${pageToken}` : '');
-      const res = await fetch(url, { headers: { Authorization: `Firebase ${token}` } });
-      if (!res.ok) break;
-      const data = await res.json();
-      for (const item of data.items || []) {
-        totalBytes += parseInt(item.size || '0', 10);
+  for (const prefix of ['jobs', 'expenses']) {
+    const prefixRef = ref(storage, prefix);
+    const topResult = await listAll(prefixRef);
+    for (const folderRef of topResult.prefixes) {
+      const folderResult = await listAll(folderRef);
+      for (const itemRef of folderResult.items) {
+        try {
+          const meta = await getMetadata(itemRef);
+          totalBytes += meta.size || 0;
+        } catch (err) {
+          console.warn('[Storage] getMetadata error for', itemRef.fullPath, ':', err.message);
+        }
       }
-      pageToken = data.nextPageToken || null;
-    } while (pageToken);
+    }
   }
   return totalBytes;
 }
@@ -121,10 +125,12 @@ async function fetchPhotoStorageBytes() {
 export default function SettingsScreen() {
   const navigation = useNavigation();
   const { user, logout } = useAuth();
+  const { emailConfig, refreshEmailConfig } = useAppData();
   const [importing,       setImporting]       = useState(false);
   const [buildVersion,    setBuildVersion]    = useState('');
   const [showSupport,     setShowSupport]     = useState(false);
   const [storageLoading,  setStorageLoading]  = useState(null);
+  const [diagLoading,     setDiagLoading]     = useState(false);
 
   const [jobs,      setJobs]      = useState([]);
   const [crews,     setCrews]     = useState([]);
@@ -135,13 +141,16 @@ export default function SettingsScreen() {
 
   const [photoStorageBytes,    setPhotoStorageBytes]    = useState(null);
   const [photoStorageLoading,  setPhotoStorageLoading]  = useState(true);
+  const [photoStorageError,    setPhotoStorageError]    = useState(false);
+  const [summaryLoading,       setSummaryLoading]       = useState(true);
 
   useEffect(() => {
-    const unsubJobs = subscribeJobs(setJobs);
-    const unsubCrews = subscribeCrews(setCrews);
-    const unsubExp = subscribeExpenses(setExpenses);
-    const unsubCust = subscribeCustomers(setCustomers);
-    return () => { unsubJobs(); unsubCrews(); unsubExp(); unsubCust(); };
+    Promise.all([
+      getJobs().then(setJobs).catch(() => {}),
+      getCrews().then(setCrews).catch(() => {}),
+      getExpenses().then(setExpenses).catch(() => {}),
+      getCustomers().then(setCustomers).catch(() => {}),
+    ]).finally(() => setSummaryLoading(false));
   }, []);
 
   const loadBuildVersion = useCallback(async () => {
@@ -157,9 +166,14 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     setPhotoStorageLoading(true);
+    setPhotoStorageError(false);
     fetchPhotoStorageBytes()
-      .then((bytes) => setPhotoStorageBytes(bytes ?? null))
-      .catch(() => setPhotoStorageBytes(null))
+      .then((bytes) => setPhotoStorageBytes(bytes))
+      .catch((err) => {
+        console.error('[Storage] photo size fetch failed:', err.message);
+        setPhotoStorageError(true);
+        setPhotoStorageBytes(null);
+      })
       .finally(() => setPhotoStorageLoading(false));
   }, []);
 
@@ -275,15 +289,21 @@ export default function SettingsScreen() {
         return;
       }
 
-      const totalPhotoCount = paidJobs.reduce((s, j) => s + (j.photos || []).length, 0);
+      const paidPhotoCount  = paidJobs.reduce((s, j) => s + (j.photos || []).length, 0);
+      const allPhotoCount   = jobs.reduce((s, j) => s + (j.photos || []).length, 0) +
+                              expenses.reduce((s, e) => s + (e.photos || []).length, 0);
+      const estimatedBytes  = allPhotoCount > 0 && photoStorageBytes
+        ? Math.round((paidPhotoCount / allPhotoCount) * photoStorageBytes)
+        : 0;
+      const sizeStr = formatSize(estimatedBytes);
 
       Alert.alert(
-        'Remove Paid Job Photos',
-        `Remove ${totalPhotoCount} photo${totalPhotoCount !== 1 ? 's' : ''} from ${paidJobs.length} paid job(s)?\n\nJob records will be kept. Continue?`,
+        'Remove Photos for Paid Jobs',
+        `This will permanently delete all photos for paid jobs, freeing up ${sizeStr}. This cannot be undone. Are you sure?`,
         [
           { text: 'Cancel', style: 'cancel' },
           {
-            text: 'Remove Photos',
+            text: 'Delete Photos',
             style: 'destructive',
             onPress: async () => {
               setStorageLoading('photos');
@@ -327,57 +347,42 @@ export default function SettingsScreen() {
       setStorageLoading(null);
 
       const paidJobs = jobs.filter((j) => (j.status || '').toLowerCase() === 'invoice paid');
+      if (paidJobs.length === 0) return;
 
-      const doErasePaidJobs = () => {
-        if (paidJobs.length === 0) {
-          Alert.alert('No Paid Jobs', 'There are no paid jobs to erase.');
-          return;
-        }
-        Alert.alert(
-          'Erase Paid Job Data',
-          `Erase ${paidJobs.length} paid job record(s) and photos?\n\nThis cannot be undone.`,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Erase',
-              style: 'destructive',
-              onPress: async () => {
-                setStorageLoading('jobs');
-                try {
-                  for (const job of paidJobs) {
-                    for (const url of (job.photos || [])) {
-                      const filename = url.split('/').pop().split('?')[0];
-                      await deleteStoragePhoto(jobPhotoPath(job.id, filename));
-                    }
-                    await deleteJob(job.id);
-                  }
-                  setStorageLoading(null);
-                  Alert.alert('Done', `Erased ${paidJobs.length} paid job(s) and their photos.`);
-                } catch (err) {
-                  setStorageLoading(null);
-                  Alert.alert('Error', err.message);
-                }
-              },
-            },
-          ]
-        );
-      };
+      const paidPhotoCount = paidJobs.reduce((s, j) => s + (j.photos || []).length, 0);
+      const allPhotoCount  = jobs.reduce((s, j) => s + (j.photos || []).length, 0) +
+                             expenses.reduce((s, e) => s + (e.photos || []).length, 0);
+      const photoEstimate  = allPhotoCount > 0 && photoStorageBytes
+        ? Math.round((paidPhotoCount / allPhotoCount) * photoStorageBytes)
+        : 0;
+      const sizeStr = formatSize(jsonBytes(paidJobs) + photoEstimate);
 
       Alert.alert(
-        'Export Complete',
-        'Would you like to also export expenses before erasing paid job data?',
+        'Erase Paid Job Data?',
+        `Your data has been exported successfully. Would you like to erase all paid job data and photos to free up ${sizeStr} of storage? This cannot be undone.`,
         [
+          { text: 'Keep Data', style: 'cancel' },
           {
-            text: 'Yes, Export Expenses',
+            text: 'Erase Paid Jobs',
+            style: 'destructive',
             onPress: async () => {
-              if (expenses.length > 0) {
-                const d2 = new Date().toISOString().slice(0, 10);
-                await shareCsv(buildExpensesCsv(expenses), `apollonia-expenses-${d2}.csv`, 'Export Expenses');
+              setStorageLoading('jobs');
+              try {
+                for (const job of paidJobs) {
+                  for (const url of (job.photos || [])) {
+                    const filename = url.split('/').pop().split('?')[0];
+                    await deleteStoragePhoto(jobPhotoPath(job.id, filename));
+                  }
+                  await deleteJob(job.id);
+                }
+                setStorageLoading(null);
+                Alert.alert('Done', `Erased ${paidJobs.length} paid job(s) and their photos.`);
+              } catch (err) {
+                setStorageLoading(null);
+                Alert.alert('Error', err.message);
               }
-              doErasePaidJobs();
             },
           },
-          { text: 'Skip', onPress: doErasePaidJobs },
         ]
       );
     } catch (err) {
@@ -401,15 +406,21 @@ export default function SettingsScreen() {
       await shareCsv(buildExpensesCsv(expenses), `apollonia-expenses-${date}.csv`, 'Export Expense Data');
       setStorageLoading(null);
 
-      const totalPhotoCount = expenses.reduce((s, e) => s + (e.photos || []).length, 0);
+      const expPhotoCount  = expenses.reduce((s, e) => s + (e.photos || []).length, 0);
+      const allPhotoCount  = jobs.reduce((s, j) => s + (j.photos || []).length, 0) +
+                             expenses.reduce((s, e) => s + (e.photos || []).length, 0);
+      const photoEstimate  = allPhotoCount > 0 && photoStorageBytes
+        ? Math.round((expPhotoCount / allPhotoCount) * photoStorageBytes)
+        : 0;
+      const sizeStr = formatSize(jsonBytes(expenses) + photoEstimate);
 
       Alert.alert(
-        'Export Complete',
-        `Erase all ${expenses.length} expense records and ${totalPhotoCount} photo${totalPhotoCount !== 1 ? 's' : ''}?\n\nThis cannot be undone.`,
+        'Erase Expense Data?',
+        `Your expense data has been exported successfully. Would you like to erase all expense data and photos to free up ${sizeStr} of storage? This cannot be undone.`,
         [
-          { text: 'Cancel', style: 'cancel' },
+          { text: 'Keep Data', style: 'cancel' },
           {
-            text: 'Erase',
+            text: 'Erase Expenses',
             style: 'destructive',
             onPress: async () => {
               setStorageLoading('expenses');
@@ -422,7 +433,7 @@ export default function SettingsScreen() {
                   await deleteExpense(exp.id);
                 }
                 setStorageLoading(null);
-                Alert.alert('Done', `Erased all expense data and photos.`);
+                Alert.alert('Done', 'Erased all expense data and photos.');
               } catch (err) {
                 setStorageLoading(null);
                 Alert.alert('Error', err.message);
@@ -450,39 +461,66 @@ export default function SettingsScreen() {
           ) : null}
         </View>
 
-        <Text style={styles.sectionLabel}>DATA SUMMARY</Text>
+        <Text style={styles.sectionLabel}>COMPANY PROFILE</Text>
         <View style={styles.card}>
-          <DataRow icon="briefcase-outline"     label="Jobs"      value={summary.jobs}      size={formatSize(sizes.jobs)}      onPress={() => navigation.navigate('Jobs', { screen: 'JobsList' })} />
-          <DataRow icon="people-outline"        label="Crews"     value={summary.crews}     size={formatSize(sizes.crews)}     onPress={() => navigation.navigate('Crews', { screen: 'CrewsList' })} divider />
-          <DataRow icon="wallet-outline"        label="Expenses"  value={summary.expenses}  size={formatSize(sizes.expenses)}  onPress={() => navigation.navigate('Expenses')} divider />
-          <DataRow icon="image-outline"         label="Photos"    value={summary.photos}    size={photoStorageLoading ? '…' : (sizes.photos == null ? '—' : formatSize(sizes.photos))} divider />
-          <DataRow icon="person-circle-outline" label="Customers" value={summary.customers} size={formatSize(sizes.customers)} onPress={() => navigation.navigate('CustomerList')} divider />
-          <View style={styles.rowDivider} />
-          <View style={styles.totalRow}>
-            <Text style={styles.totalLabel}>TOTAL</Text>
-            <Text style={styles.totalValue}>{formatSize(totalBytes)}</Text>
-          </View>
+          <TouchableOpacity style={styles.settingsRow} onPress={() => navigation.navigate('CompanyProfile')} activeOpacity={0.7}>
+            <View style={styles.settingsRowLeft}>
+              <Ionicons name="business-outline" size={20} color={colors.primary} />
+              <Text style={styles.settingsRowLabel}>Identity, Logo &amp; Tax Rates</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
         </View>
 
-        <Text style={styles.sectionLabel}>REPORTS</Text>
+        <Text style={styles.sectionLabel}>APP CONFIGURATION</Text>
         <View style={styles.card}>
-          <ReportRow
-            icon="bar-chart-outline"
-            label="Revenue YTD"
-            onPress={() => navigation.navigate('RevenueYTD')}
-          />
-          <View style={styles.rowDivider} />
-          <ReportRow
-            icon="people-outline"
-            label="Crew Pay YTD"
-            onPress={() => navigation.navigate('CrewPayYTD')}
-          />
-          <View style={styles.rowDivider} />
-          <ReportRow
-            icon="time-outline"
-            label="Activity Log"
-            onPress={() => navigation.navigate('ActivityLog')}
-          />
+          <TouchableOpacity style={styles.settingsRow} onPress={() => navigation.navigate('JobTypes')} activeOpacity={0.7}>
+            <View style={styles.settingsRowLeft}>
+              <Ionicons name="list-outline" size={20} color={colors.primary} />
+              <Text style={styles.settingsRowLabel}>Job Types &amp; Invoice Defaults</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+
+        {user?.email === 'coachward4fun@gmail.com' && (
+          <>
+            <Text style={styles.sectionLabel}>EMAIL CONFIGURATION</Text>
+            <View style={styles.card}>
+              <EmailConfigSection
+                emailConfig={emailConfig}
+                onSaved={refreshEmailConfig}
+              />
+            </View>
+
+            <Text style={styles.sectionLabel}>SMS CONFIGURATION</Text>
+            <View style={styles.card}>
+              <SMSConfigSection />
+            </View>
+          </>
+        )}
+
+        <Text style={styles.sectionLabel}>DATA SUMMARY</Text>
+        <View style={styles.card}>
+          {summaryLoading ? (
+            <>
+              <SkeletonCard />
+              <SkeletonCard />
+            </>
+          ) : (
+            <>
+              <DataRow icon="briefcase-outline"     label="Jobs"      value={summary.jobs}      size={formatSize(sizes.jobs)}      onPress={() => navigation.navigate('Jobs', { screen: 'JobsList' })} />
+              <DataRow icon="people-outline"        label="Crews"     value={summary.crews}     size={formatSize(sizes.crews)}     onPress={() => navigation.navigate('Crews', { screen: 'CrewsList' })} divider />
+              <DataRow icon="wallet-outline"        label="Expenses"  value={summary.expenses}  size={formatSize(sizes.expenses)}  onPress={() => navigation.navigate('Expenses')} divider />
+              <DataRow icon="image-outline"         label="Photos"    value={summary.photos}    size={photoStorageLoading ? '…' : photoStorageError ? 'Unable to calculate' : sizes.photos == null ? '—' : formatSize(sizes.photos)} divider />
+              <DataRow icon="person-circle-outline" label="Customers" value={summary.customers} size={formatSize(sizes.customers)} onPress={() => navigation.navigate('CustomerList')} divider />
+              <View style={styles.rowDivider} />
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>TOTAL</Text>
+                <Text style={styles.totalValue}>{formatSize(totalBytes)}</Text>
+              </View>
+            </>
+          )}
         </View>
 
         <Text style={styles.sectionLabel}>STORAGE MANAGEMENT</Text>
@@ -562,16 +600,56 @@ export default function SettingsScreen() {
           <TouchableOpacity
             style={styles.settingsRow}
             activeOpacity={0.7}
+            disabled={diagLoading}
             onPress={async () => {
-              Alert.alert('Storage Test', 'Running — check the Expo console for results.');
-              await testStorageConnection();
+              setDiagLoading(true);
+              try {
+                const r = await testStorageConnection();
+                const lines = [
+                  r.authenticated
+                    ? `Authentication: Authenticated as ${r.email}`
+                    : 'Authentication: Not authenticated',
+                  r.bucket
+                    ? `Storage bucket: Connected to ${r.bucket}`
+                    : 'Storage bucket: Cannot reach bucket',
+                  r.readOk
+                    ? 'Read access: Read access OK'
+                    : `Read access: Read access FAILED: ${r.readError || 'unknown'}`,
+                  r.writeOk
+                    ? 'Write access: Write access OK'
+                    : `Write access: Write access FAILED: ${r.writeError || 'unknown'}`,
+                  '',
+                  r.overallOk
+                    ? '✅ Storage Connected'
+                    : `❌ Storage Failed: ${r.failReason || 'unknown error'}`,
+                ];
+                const parts = [];
+                if (r.authenticated) parts.push('Auth OK'); else parts.push('Auth FAILED');
+                if (r.bucket)        parts.push('Bucket OK'); else parts.push('Bucket FAILED');
+                if (r.readOk)        parts.push('Read OK'); else parts.push(`Read FAILED: ${r.readError || 'unknown'}`);
+                if (r.writeOk)       parts.push('Write OK'); else parts.push(`Write FAILED: ${r.writeError || 'unknown'}`);
+                const logDetails = r.overallOk
+                  ? `✅ Storage Connected - ${parts.join(', ')}`
+                  : `❌ Storage Failed - ${parts.join(', ')}`;
+                logActivity('storage_connection_test', logDetails);
+                Alert.alert('Storage Test Results', lines.join('\n'));
+              } catch (err) {
+                Alert.alert('Storage Test Failed', err.message || 'Unexpected error');
+              } finally {
+                setDiagLoading(false);
+              }
             }}
           >
             <View style={styles.settingsRowLeft}>
-              <Ionicons name="cloud-upload-outline" size={20} color={colors.primary} />
-              <Text style={styles.settingsRowLabel}>Test Storage Connection</Text>
+              <Ionicons name="cloud-upload-outline" size={20} color={diagLoading ? colors.textMuted : colors.primary} />
+              <Text style={[styles.settingsRowLabel, diagLoading && { color: colors.textMuted }]}>
+                {diagLoading ? 'Testing Storage…' : 'Test Storage Connection'}
+              </Text>
             </View>
-            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            {diagLoading
+              ? <ActivityIndicator size="small" color={colors.primary} />
+              : <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+            }
           </TouchableOpacity>
         </View>
 
@@ -701,15 +779,331 @@ function DataRow({ icon, label, value, size, divider, onPress }) {
   );
 }
 
-function ReportRow({ icon, label, onPress }) {
+
+function SMSConfigSection() {
+  const [accountSid,  setAccountSid]  = useState('');
+  const [authToken,   setAuthToken]   = useState('');
+  const [tokenLocked, setTokenLocked] = useState(true);
+  const [fromNumber,  setFromNumber]  = useState('');
+  const [saving,      setSaving]      = useState(false);
+  const [loaded,      setLoaded]      = useState(false);
+  const [testing,     setTesting]     = useState(false);
+  const [testResult,  setTestResult]  = useState(null);
+
+  useEffect(() => {
+    getTwilioConfig().then((cfg) => {
+      if (cfg) {
+        setAccountSid(cfg.accountSid || '');
+        setFromNumber(cfg.fromNumber || '');
+        // authToken intentionally not pre-filled
+      }
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const updates = {
+        accountSid: accountSid.trim(),
+        fromNumber: fromNumber.trim(),
+      };
+      if (!tokenLocked && authToken.trim()) {
+        updates.authToken = authToken.trim();
+      }
+      await saveTwilioConfig(updates);
+      invalidateSMSConfig();
+      setAuthToken('');
+      setTokenLocked(true);
+      setTestResult(null);
+      Alert.alert('Saved', 'SMS configuration updated.');
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not save SMS configuration.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTestSMS = async () => {
+    setTesting(true);
+    setTestResult(null);
+    invalidateSMSConfig();
+
+    const toNumber = '+14023123535';
+    const message  = 'Apollonia Test SMS - if you receive this, SMS is working!';
+
+    // Log config before sending so we can see what's loaded
+    const config = await getSMSConfig();
+    console.log('Twilio config loaded:', config ? 'yes' : 'no');
+    console.log('AccountSid:', config?.accountSid?.substring(0, 10));
+    console.log('FromNumber:', config?.fromNumber);
+
+    const result = await sendSMS(toNumber, message);
+
+    setTestResult({ ok: result.success });
+
+    if (result.success) {
+      logActivity('sms_test_sent', `Test SMS sent successfully - SID: ${result.sid} - To: ${toNumber}`);
+      Alert.alert(
+        '✅ SMS Sent!',
+        `SID: ${result.sid}\nTo: ${toNumber}`,
+        [{ text: 'OK' }]
+      );
+    } else {
+      logActivity('sms_test_failed', `Test SMS FAILED - Error: ${result.error}`);
+      Alert.alert(
+        '❌ SMS Failed',
+        String(result.error),
+        [{ text: 'OK' }]
+      );
+    }
+
+    setTesting(false);
+  };
+
+  if (!loaded) return <ActivityIndicator color={colors.primary} style={{ padding: 12 }} />;
+
   return (
-    <TouchableOpacity style={styles.settingsRow} onPress={onPress} activeOpacity={0.7}>
-      <View style={styles.settingsRowLeft}>
-        <Ionicons name={icon} size={20} color={colors.primary} />
-        <Text style={styles.settingsRowLabel}>{label}</Text>
+    <View>
+      <ConfigField label="Account SID" value={accountSid} onChangeText={setAccountSid} placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autoCapitalize="none" />
+      <View style={styles.configDivider} />
+      <View style={styles.configField}>
+        <Text style={styles.configFieldLabel}>Auth Token</Text>
+        <View style={styles.appPasswordRow}>
+          <TextInput
+            style={[styles.configFieldInput, { flex: 1 }]}
+            value={tokenLocked ? '••••••••••••••••' : authToken}
+            onChangeText={tokenLocked ? undefined : setAuthToken}
+            placeholder={tokenLocked ? '' : 'leave blank to keep existing'}
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry={!tokenLocked}
+            editable={!tokenLocked}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            onPress={() => {
+              if (tokenLocked) {
+                Alert.alert(
+                  'Edit Auth Token',
+                  'Warning: Changes to this field will impact SMS delivery. Are you sure you want to edit this?',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Unlock', onPress: () => { setTokenLocked(false); setAuthToken(''); } },
+                  ]
+                );
+              } else {
+                setTokenLocked(true);
+                setAuthToken('');
+              }
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={tokenLocked ? 'lock-closed' : 'lock-open'}
+              size={18}
+              color={tokenLocked ? colors.textMuted : colors.primary}
+            />
+          </TouchableOpacity>
+        </View>
       </View>
-      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-    </TouchableOpacity>
+      <View style={styles.configDivider} />
+      <ConfigField label="From Number" value={fromNumber} onChangeText={setFromNumber} placeholder="+18005551234" autoCapitalize="none" keyboardType="phone-pad" />
+
+      <View style={styles.smsTrialNote}>
+        <Ionicons name="information-circle-outline" size={14} color={colors.textMuted} />
+        <Text style={styles.smsTrialText}>
+          Trial mode: SMS only sends to verified numbers. Upgrade your Twilio account to send to all numbers.
+        </Text>
+      </View>
+
+      <TouchableOpacity
+        style={[styles.saveConfigButton, saving && { opacity: 0.6 }]}
+        onPress={handleSave}
+        disabled={saving}
+        activeOpacity={0.7}
+      >
+        {saving
+          ? <ActivityIndicator color="#fff" size="small" />
+          : <Text style={styles.saveConfigButtonText}>Save SMS Config</Text>
+        }
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[styles.testSmsButton, testing && { opacity: 0.6 }]}
+        onPress={handleTestSMS}
+        disabled={testing}
+        activeOpacity={0.7}
+      >
+        {testing
+          ? <ActivityIndicator color={colors.primary} size="small" />
+          : (
+            <>
+              <Ionicons name="send-outline" size={15} color={colors.primary} />
+              <Text style={styles.testSmsButtonText}>Send Test SMS to 402-312-3535</Text>
+            </>
+          )
+        }
+      </TouchableOpacity>
+
+      {testResult && (
+        <Text style={[styles.smsTestStatus, { color: testResult.ok ? '#16a34a' : '#dc2626' }]}>
+          {testResult.ok ? '✅ Test sent — check your phone' : '❌ Test failed — see alert for details'}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+function EmailConfigSection({ emailConfig, onSaved }) {
+  const [fromEmail,      setFromEmail]      = useState('');
+  const [fromName,       setFromName]       = useState('');
+  const [appPassword,    setAppPassword]    = useState('');
+  const [passwordLocked, setPasswordLocked] = useState(true);
+  const [replyTo,        setReplyTo]        = useState('');
+  const [cc,             setCc]             = useState('');
+  const [saving,         setSaving]         = useState(false);
+
+  useEffect(() => {
+    if (!emailConfig) return;
+    setFromEmail(emailConfig.fromEmail || '');
+    setFromName(emailConfig.fromName || '');
+    setReplyTo(emailConfig.replyTo || '');
+    setCc((emailConfig.cc || []).join(', '));
+    // appPassword left blank — type a new one to change it
+  }, [emailConfig]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const updates = {
+        fromEmail: fromEmail.trim(),
+        fromName:  fromName.trim(),
+        replyTo:   replyTo.trim(),
+        cc:        cc.split(',').map((e) => e.trim()).filter(Boolean),
+      };
+      if (!passwordLocked && appPassword.trim()) {
+        updates.appPassword = appPassword.trim();
+      }
+      await saveEmailConfig(updates);
+      setAppPassword('');
+      setPasswordLocked(true);
+      onSaved?.();
+      Alert.alert('Saved', 'Email configuration updated successfully.');
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not save email configuration.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View>
+      <ConfigField
+        label="From Email"
+        value={fromEmail}
+        onChangeText={setFromEmail}
+        placeholder="from@gmail.com"
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <View style={styles.configDivider} />
+      <ConfigField
+        label="From Name"
+        value={fromName}
+        onChangeText={setFromName}
+        placeholder="Your Name — Company Name"
+      />
+      <View style={styles.configDivider} />
+      <View style={styles.configField}>
+        <Text style={styles.configFieldLabel}>App Password</Text>
+        <View style={styles.appPasswordRow}>
+          <TextInput
+            style={[styles.configFieldInput, { flex: 1 }]}
+            value={passwordLocked ? '••••••••••••••••' : appPassword}
+            onChangeText={passwordLocked ? undefined : setAppPassword}
+            placeholder={passwordLocked ? '' : 'leave blank to keep existing'}
+            placeholderTextColor={colors.textMuted}
+            secureTextEntry={!passwordLocked}
+            editable={!passwordLocked}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            onPress={() => {
+              if (passwordLocked) {
+                Alert.alert(
+                  'Edit App Password',
+                  'Warning: Changes to this field will impact the delivery of all invoice emails. Are you sure you want to edit this?',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Unlock', onPress: () => { setPasswordLocked(false); setAppPassword(''); } },
+                  ]
+                );
+              } else {
+                setPasswordLocked(true);
+                setAppPassword('');
+              }
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={passwordLocked ? 'lock-closed' : 'lock-open'}
+              size={18}
+              color={passwordLocked ? colors.textMuted : colors.primary}
+            />
+          </TouchableOpacity>
+        </View>
+      </View>
+      <View style={styles.configDivider} />
+      <ConfigField
+        label="Reply-To"
+        value={replyTo}
+        onChangeText={setReplyTo}
+        placeholder="reply@email.com"
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <View style={styles.configDivider} />
+      <ConfigField
+        label="CC Emails (comma-separated)"
+        value={cc}
+        onChangeText={setCc}
+        placeholder="cc1@email.com, cc2@email.com"
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+      <TouchableOpacity
+        style={[styles.saveConfigButton, saving && { opacity: 0.6 }]}
+        onPress={handleSave}
+        disabled={saving}
+        activeOpacity={0.7}
+      >
+        {saving
+          ? <ActivityIndicator color="#fff" size="small" />
+          : <Text style={styles.saveConfigButtonText}>Save Email Config</Text>
+        }
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function ConfigField({ label, value, onChangeText, placeholder, secureTextEntry, autoCapitalize, keyboardType }) {
+  return (
+    <View style={styles.configField}>
+      <Text style={styles.configFieldLabel}>{label}</Text>
+      <TextInput
+        style={styles.configFieldInput}
+        value={value}
+        onChangeText={onChangeText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.textMuted}
+        secureTextEntry={secureTextEntry}
+        autoCapitalize={autoCapitalize || 'sentences'}
+        keyboardType={keyboardType || 'default'}
+        autoCorrect={false}
+      />
+    </View>
   );
 }
 
@@ -879,4 +1273,43 @@ const styles = StyleSheet.create({
 
   clearButton: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
   clearButtonText: { fontSize: 15, fontWeight: '600', color: '#dc2626' },
+
+  configField: { paddingVertical: 10 },
+  appPasswordRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  smsTrialNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 12, marginBottom: 4 },
+  smsTrialText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 17 },
+  configFieldLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 6 },
+  configFieldInput: {
+    backgroundColor: '#f9fafb',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.textPrimary,
+  },
+  configDivider: { height: 1, backgroundColor: '#f3f4f6' },
+  testSmsButton: {
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingVertical: 12,
+    marginTop: 10,
+  },
+  testSmsButtonText: { color: colors.primary, fontSize: 14, fontWeight: '600' },
+  smsTestStatus: { fontSize: 12, fontWeight: '600', textAlign: 'center', marginTop: 8 },
+  saveConfigButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 13,
+    marginTop: 12,
+  },
+  saveConfigButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
 });

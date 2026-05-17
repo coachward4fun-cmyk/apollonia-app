@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,10 +10,13 @@ import {
   TouchableOpacity,
   Platform,
   useWindowDimensions,
+  Modal,
+  PanResponder,
 } from 'react-native';
-import { subscribeJobs, subscribeExpenses } from '../services/db';
 import { useNavigation } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
+import { useAppData } from '../context/AppDataContext';
 
 const TODAY = new Date();
 
@@ -21,19 +24,6 @@ function formatDate(d) {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-function isSameDay(a, b) {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
-}
-
-function addDays(d, n) {
-  const r = new Date(d);
-  r.setDate(r.getDate() + n);
-  return r;
-}
 
 function dateToStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -48,25 +38,51 @@ function fmtK(n) {
   return `${sign}$${Math.round(abs)}`;
 }
 
-function buildMonthStats(jobs, expenses, monthKey) {
-  const monthJobs = jobs.filter((j) => (j.targetDate || '').startsWith(monthKey));
-  const monthExp  = expenses.filter((e) => (e.date || '').startsWith(monthKey));
+function buildCalendarDays(year, month, jobs) {
+  const firstDay    = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const startOffset = firstDay.getDay(); // 0=Sun
 
-  const totalJobs = monthJobs.length;
+  const monthStr = `${year}-${String(month + 1).padStart(2, '0')}`;
+  const jobMap   = {};
+  for (const job of jobs) {
+    const td = job.targetDate || '';
+    if (!td.startsWith(monthStr)) continue;
+    if (!jobMap[td]) jobMap[td] = { count: 0, allHaveCrew: true };
+    jobMap[td].count++;
+    if (!job.crewId) jobMap[td].allHaveCrew = false;
+  }
 
-  const invoiced = monthJobs
-    .filter((j) => { const s = (j.status || '').toLowerCase(); return s === 'invoice ready' || s === 'invoice sent'; })
-    .reduce((s, j) => s + (Number(j.invoiceTotal) || 0), 0);
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dateStr = `${monthStr}-${String(d).padStart(2, '0')}`;
+    const info    = jobMap[dateStr];
+    cells.push({ day: d, dateStr, count: info ? info.count : 0, allHaveCrew: info ? info.allHaveCrew : true });
+  }
+  return cells;
+}
 
-  const paidJobs = monthJobs.filter((j) => (j.status || '').toLowerCase() === 'invoice paid');
-  const jobsPaid = paidJobs.length;
-  const revenue  = paidJobs.reduce((s, j) => s + (Number(j.invoiceTotal) || 0), 0);
+// Pay week runs Friday → Thursday
+function getPayWeekRange() {
+  const today = new Date();
+  const dow = today.getDay(); // 0=Sun, 5=Fri
+  const daysSinceFri = (dow + 2) % 7;
+  const fri = new Date(today);
+  fri.setDate(today.getDate() - daysSinceFri);
+  const thu = new Date(fri);
+  thu.setDate(fri.getDate() + 6);
+  return { start: dateToStr(fri), end: dateToStr(thu) };
+}
 
-  const expTotal = monthExp.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-  const net      = revenue - expTotal;
-  const margin   = revenue > 0 ? (net / revenue) * 100 : null;
-
-  return { totalJobs, invoiced, jobsPaid, revenue, expTotal, net, margin };
+function jobCrewPay(job) {
+  if (job.crewCost != null && job.crewCost !== '') return Number(job.crewCost) || 0;
+  const days = Number(job.estimatedDuration) || 1;
+  return (
+    (Number(job.crewLeads)   || 0) * (Number(job.leadDailyRate)   || 0) * days +
+    (Number(job.crewHelpers) || 0) * (Number(job.helperDailyRate) || 0) * days +
+    (Number(job.crewWorkers) || 0) * (Number(job.workerDailyRate) || 0) * days
+  );
 }
 
 function localDateStr(i) {
@@ -81,6 +97,7 @@ function buildStats(jobs) {
   let unassigned = 0;
   let notScheduled = 0;
   let scheduledNoCrew = 0;
+  let invoiceNeeded = 0;
   let invoiceReady = 0;
   let invoiceSent = 0;
   let invoicePaid = 0;
@@ -89,6 +106,8 @@ function buildStats(jobs) {
 
   // Build the 7 date strings once using local time (no UTC parsing)
   const next7DateStrs = Array.from({ length: 7 }, (_, i) => localDateStr(i));
+  const todayStr = next7DateStrs[0];
+  const invoiceNeededExcluded = new Set(['cancelled', 'invoice paid', 'invoice sent', 'invoice ready']);
 
   for (const job of jobs) {
     const status = (job.status || '').toLowerCase();
@@ -100,57 +119,44 @@ function buildStats(jobs) {
     } else {
       scheduled++;
       if (!hasCrew) scheduledNoCrew++;
+    }
 
-      const jobDateStr = job.targetDate || job.scheduledDate;
-      const idx = next7DateStrs.indexOf(jobDateStr);
-      if (idx !== -1) {
-        next7[idx]++;
-        if (!hasCrew) next7HasMissingCrew[idx] = true;
-      }
+    // Next-7-day counts must match what JobsScreen shows when filtered by date:
+    // strictly job.targetDate, regardless of status. (Archived jobs are filtered
+    // upstream in the subscribeJobs callback before buildStats is called.)
+    const idx = next7DateStrs.indexOf(job.targetDate);
+    if (idx !== -1) {
+      next7[idx]++;
+      if (!hasCrew) next7HasMissingCrew[idx] = true;
     }
 
     if (!hasCrew) unassigned++;
 
+    if (job.targetDate && job.targetDate <= todayStr && !invoiceNeededExcluded.has(status)) invoiceNeeded++;
     if (status === 'invoice ready') invoiceReady++;
     else if (status === 'invoice sent') invoiceSent++;
-    else if (status === 'invoice paid' || status === 'completed') invoicePaid++;
+    else if (status === 'invoice paid') invoicePaid++;
   }
 
-  return { total, scheduled, unassigned, notScheduled, scheduledNoCrew, invoiceReady, invoiceSent, invoicePaid, next7, next7HasMissingCrew };
+  return { total, scheduled, unassigned, notScheduled, scheduledNoCrew, invoiceNeeded, invoiceReady, invoiceSent, invoicePaid, next7, next7HasMissingCrew };
 }
-
-const EMPTY = {
-  total: 0, scheduled: 0, unassigned: 0, notScheduled: 0,
-  scheduledNoCrew: 0, invoiceReady: 0, invoiceSent: 0, invoicePaid: 0,
-  next7: Array(7).fill(0),
-  next7HasMissingCrew: Array(7).fill(false),
-};
 
 export default function DashboardScreen() {
   const navigation = useNavigation();
   const { width }  = useWindowDimensions();
   const isPad      = Platform.OS === 'ios' && Platform.isPad;
-  const [stats, setStats] = useState(EMPTY);
-  const [refreshing, setRefreshing] = useState(false);
-  const [jobs,      setJobs]      = useState([]);
-  const [expenses,  setExpenses]  = useState([]);
+  const { activeJobs: jobs } = useAppData();
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
 
-  // Real-time Firestore subscriptions — no need for useFocusEffect
-  useEffect(() => {
-    const unsubJobs = subscribeJobs((data) => {
-      setJobs(data);
-      setStats(buildStats(data));
-    });
-    const unsubExp = subscribeExpenses((data) => setExpenses(data));
-    return () => { unsubJobs(); unsubExp(); };
-  }, []);
+  const stats = useMemo(() => buildStats(jobs), [jobs]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     setTimeout(() => setRefreshing(false), 600);
   }, []);
 
-  const WEEK_DAYS = Array.from({ length: 7 }, (_, i) => {
+  const WEEK_DAYS = useMemo(() => Array.from({ length: 7 }, (_, i) => {
     const d = new Date();
     d.setDate(d.getDate() + i);
     return {
@@ -160,22 +166,26 @@ export default function DashboardScreen() {
       missingCrew: stats.next7HasMissingCrew[i],
       dateStr: localDateStr(i),
     };
-  });
+  }), [stats]);
 
   const scheduledWithCrew = stats.scheduled - stats.scheduledNoCrew;
 
-  const THREE_MONTHS = [-2, -1, 0].map((offset) => {
-    const d = new Date(TODAY.getFullYear(), TODAY.getMonth() + offset, 1);
-    const y = d.getFullYear();
-    const m = d.getMonth();
-    const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+  const { weekStart, weekEnd, weekJobs, weekPaidJobs, weekUnpaidJobs, weekCrewCost, weekPaidCost, weekUnpaidCost } = useMemo(() => {
+    const { start, end } = getPayWeekRange();
+    const all    = jobs.filter((j) => j.targetDate && j.targetDate >= start && j.targetDate <= end);
+    const paid   = all.filter((j) => j.crewPaidAt);
+    const unpaid = all.filter((j) => j.crewId && !j.crewPaidAt);
     return {
-      key,
-      label: d.toLocaleDateString('en-US', { month: 'short' }).toUpperCase(),
-      isCurrent: offset === 0,
-      stats: buildMonthStats(jobs, expenses, key),
+      weekStart:    start,
+      weekEnd:      end,
+      weekJobs:     all,
+      weekPaidJobs: paid,
+      weekUnpaidJobs: unpaid,
+      weekCrewCost:   all.reduce((s, j) => s + jobCrewPay(j), 0),
+      weekPaidCost:   paid.reduce((s, j) => s + jobCrewPay(j), 0),
+      weekUnpaidCost: unpaid.reduce((s, j) => s + jobCrewPay(j), 0),
     };
-  });
+  }, [jobs]);
 
   const navToJobs = (params) =>
     navigation.navigate('Jobs', { screen: 'JobsList', params });
@@ -212,25 +222,25 @@ export default function DashboardScreen() {
             value={scheduledWithCrew}
             accent={colors.primary}
             disabled={scheduledWithCrew === 0}
-            onPress={() => navToJobs({ filter: 'Scheduled' })}
+            onPress={() => navToJobs({ filter: 'Scheduled With Crew' })}
           />
           <PipelineBox
             label="Sched / No Crew"
             value={stats.scheduledNoCrew}
             accent="#d97706"
             disabled={stats.scheduledNoCrew === 0}
-            onPress={() => navToJobs({ filter: 'Unassigned' })}
+            onPress={() => navToJobs({ filter: 'Scheduled No Crew' })}
           />
         </View>
 
         {/* Next 7 Days */}
-        <SectionLabel title="Jobs for Next 7 Days" />
+        <SectionLabel title="Jobs for Next 7 Days" rightIcon="calendar" onRightIconPress={() => setShowCalendar(true)} />
         <View style={styles.weekRow}>
           {WEEK_DAYS.map((d, i) => (
             <TouchableOpacity
               key={i}
               style={[styles.dayBox, d.count > 0 && styles.dayBoxActive]}
-              onPress={() => navToJobs({ date: d.dateStr, filter: 'All' })}
+              onPress={() => navToJobs({ date: d.dateStr })}
               activeOpacity={0.75}
             >
               <Text style={[styles.dayName, d.count > 0 && styles.dayNameActive]}>{d.short}</Text>
@@ -247,11 +257,20 @@ export default function DashboardScreen() {
 
         {/* Invoicing */}
         <SectionLabel title="Invoicing" />
-        <View style={styles.threeRow}>
+        <View style={styles.fourRow}>
+          <InvoiceBox
+            label="Invoice Needed"
+            value={stats.invoiceNeeded}
+            accent="#7c3aed"
+            compact
+            disabled={stats.invoiceNeeded === 0}
+            onPress={() => navToJobs({ filter: 'Invoice Needed' })}
+          />
           <InvoiceBox
             label="Invoice Ready"
             value={stats.invoiceReady}
             accent="#2563eb"
+            compact
             disabled={stats.invoiceReady === 0}
             onPress={() => navigation.navigate('Invoice', { filter: 'invoice ready' })}
           />
@@ -259,6 +278,7 @@ export default function DashboardScreen() {
             label="Invoice Sent"
             value={stats.invoiceSent}
             accent="#d97706"
+            compact
             disabled={stats.invoiceSent === 0}
             onPress={() => navigation.navigate('Invoice', { filter: 'invoice sent' })}
           />
@@ -266,146 +286,357 @@ export default function DashboardScreen() {
             label="Invoice Paid"
             value={stats.invoicePaid}
             accent={colors.primary}
+            compact
             disabled={stats.invoicePaid === 0}
             onPress={() => navigation.navigate('Invoice', { filter: 'invoice paid' })}
           />
         </View>
 
-        {/* Financials */}
-        <SectionLabel title="Financials" />
-        <FinancialsTable
-          months={THREE_MONTHS}
-          onMonthPress={(monthKey) => navToJobs({ month: monthKey, filter: 'All' })}
-        />
+        {/* Crew $ */}
+        <SectionLabel title="Crew $" />
+        <View style={styles.threeRow}>
+          <CrewBox
+            label="Jobs This Week"
+            count={weekJobs.length}
+            amount={weekCrewCost}
+            accent="#6b7280"
+            disabled={weekJobs.length === 0}
+            onPress={() => navToJobs({ weekStart, weekEnd })}
+          />
+          <CrewBox
+            label="Crews Paid"
+            count={weekPaidJobs.length}
+            amount={weekPaidCost}
+            accent={colors.primary}
+            disabled={weekPaidJobs.length === 0}
+            onPress={() => navToJobs({ weekStart, weekEnd, crewPay: 'paid' })}
+          />
+          <CrewBox
+            label="Crews to Pay"
+            count={weekUnpaidJobs.length}
+            amount={weekUnpaidCost}
+            accent="#d97706"
+            disabled={weekUnpaidJobs.length === 0}
+            onPress={() => navToJobs({ weekStart, weekEnd, crewPay: 'unpaid' })}
+          />
+        </View>
+
+        {/* Reports — moved here from Admin so they're one tap from the dashboard. */}
+        <SectionLabel title="Reports" />
+        <View style={styles.reportsCard}>
+          <ReportRow
+            icon="stats-chart-outline"
+            label="Financials"
+            onPress={() => navigation.navigate('Admin', { screen: 'Financials' })}
+          />
+          <View style={styles.reportsDivider} />
+          <ReportRow
+            icon="bar-chart-outline"
+            label="Revenue YTD"
+            onPress={() => navigation.navigate('Admin', { screen: 'RevenueYTD' })}
+          />
+          <View style={styles.reportsDivider} />
+          <ReportRow
+            icon="people-outline"
+            label="Crew Pay YTD"
+            onPress={() => navigation.navigate('Admin', { screen: 'CrewPayYTD' })}
+          />
+          <View style={styles.reportsDivider} />
+          <ReportRow
+            icon="time-outline"
+            label="Activity Log"
+            onPress={() => navigation.navigate('Admin', { screen: 'ActivityLog' })}
+          />
+        </View>
 
         <View style={{ height: 16 }} />
         </View>
       </ScrollView>
+
+      <CalendarModal
+        visible={showCalendar}
+        jobs={jobs}
+        onDayPress={(dateStr) => navToJobs({ date: dateStr })}
+        onClose={() => setShowCalendar(false)}
+      />
     </SafeAreaView>
   );
 }
 
-function SectionLabel({ title }) {
-  return <Text style={styles.sectionTitle}>{title}</Text>;
+function SectionLabel({ title, rightIcon, onRightIconPress }) {
+  return (
+    <View style={styles.sectionTitleRow}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {rightIcon ? (
+        <TouchableOpacity onPress={onRightIconPress} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Ionicons name={rightIcon} size={18} color={colors.primary} />
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
 }
 
+// Disabled (zero-count) boxes render as a plain View — no TouchableOpacity, no
+// press handler, no touch feedback. Clearly distinct grey "0" so the user can
+// see it's inactive at a glance.
+
 function PipelineBox({ label, value, accent, onPress, disabled }) {
+  if (disabled) {
+    return (
+      <View style={[styles.pipelineBox, styles.boxInactive]}>
+        <Text style={[styles.pipelineValue, styles.boxInactiveValue]}>0</Text>
+        <Text style={[styles.pipelineLabel, styles.boxInactiveLabel]}>{label}</Text>
+      </View>
+    );
+  }
   return (
-    <TouchableOpacity
-      style={[styles.pipelineBox, disabled && styles.boxDisabled]}
-      onPress={disabled ? undefined : onPress}
-      activeOpacity={disabled ? 1 : 0.72}
-    >
-      <Text style={[styles.pipelineValue, { color: disabled ? '#9ca3af' : accent }]}>{value}</Text>
+    <TouchableOpacity style={styles.pipelineBox} onPress={onPress} activeOpacity={0.72}>
+      <Text style={[styles.pipelineValue, { color: accent }]}>{value}</Text>
       <Text style={styles.pipelineLabel}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-function InvoiceBox({ label, value, accent, onPress, disabled }) {
+function InvoiceBox({ label, value, accent, onPress, disabled, compact }) {
+  if (disabled) {
+    return (
+      <View style={[styles.invoiceBox, styles.boxInactive]}>
+        <View style={[styles.invoiceAccentBar, { backgroundColor: '#e5e7eb' }]} />
+        <Text style={[styles.invoiceValue, compact && styles.invoiceValueCompact, styles.boxInactiveValue]}>0</Text>
+        <Text style={[styles.invoiceLabel, compact && styles.invoiceLabelCompact, styles.boxInactiveLabel]}>{label}</Text>
+      </View>
+    );
+  }
   return (
-    <TouchableOpacity
-      style={[styles.invoiceBox, disabled && styles.boxDisabled]}
-      onPress={disabled ? undefined : onPress}
-      activeOpacity={disabled ? 1 : 0.72}
-    >
-      <View style={[styles.invoiceAccentBar, { backgroundColor: disabled ? '#e5e7eb' : accent }]} />
-      <Text style={[styles.invoiceValue, { color: disabled ? '#9ca3af' : accent }]}>{value}</Text>
-      <Text style={styles.invoiceLabel}>{label}</Text>
+    <TouchableOpacity style={styles.invoiceBox} onPress={onPress} activeOpacity={0.72}>
+      <View style={[styles.invoiceAccentBar, { backgroundColor: accent }]} />
+      <Text style={[styles.invoiceValue, compact && styles.invoiceValueCompact, { color: accent }]}>{value}</Text>
+      <Text style={[styles.invoiceLabel, compact && styles.invoiceLabelCompact]}>{label}</Text>
     </TouchableOpacity>
   );
 }
 
-const FIN_ROWS = [
-  { key: 'totalJobs', label: 'Total Jobs', fmt: (s) => String(s.totalJobs) },
-  { key: 'jobsPaid',  label: 'Jobs Paid',  fmt: (s) => String(s.jobsPaid) },
-  { key: 'invoiced',  label: 'Not Paid $', fmt: (s) => fmtK(s.invoiced) },
-  { key: 'revenue',   label: 'Revenue',    fmt: (s) => fmtK(s.revenue) },
-  { key: 'expTotal',  label: 'Expenses',   fmt: (s) => fmtK(s.expTotal) },
-  { key: 'net',    label: 'Net $',    bold: true, fmt: (s) => fmtK(s.net),    getColor: (s) => s.net < 0 ? '#dc2626' : '#16a34a' },
-  { key: 'margin', label: 'Margin %', fmt: (s) => s.margin === null ? 'N/A' : `${Math.round(s.margin)}%`, getColor: (s) => s.margin === null ? colors.textMuted : s.margin >= 0 ? '#16a34a' : '#dc2626' },
-];
-
-const H_HDR = 40;
-const H_ROW = 26;
-const H_DIV = 11;
-
-function FinancialsTable({ months, onMonthPress }) {
-  return (
-    <View style={styles.finTable}>
-      <View style={styles.finTableInner}>
-        {/* Labels column */}
-        <View style={styles.finLabels}>
-          <View style={{ height: H_HDR }} />
-          <View style={{ height: H_DIV }} />
-          {FIN_ROWS.map((row, idx) =>
-            !row ? (
-              <View key={`d${idx}`} style={{ height: H_DIV }} />
-            ) : (
-              <View key={row.key} style={{ height: H_ROW, justifyContent: 'center' }}>
-                <Text style={styles.finMetricLabel}>{row.label}</Text>
-              </View>
-            )
-          )}
-        </View>
-
-        {/* Month column boxes */}
-        {months.map((m) => {
-          const disabled = m.stats.totalJobs === 0;
-          return (
-            <TouchableOpacity
-              key={m.key}
-              style={[
-                styles.finMonthBox,
-                m.isCurrent && styles.finMonthBoxCurrent,
-                disabled && styles.finMonthBoxDisabled,
-              ]}
-              onPress={disabled ? undefined : () => onMonthPress(m.key)}
-              activeOpacity={disabled ? 1 : 0.72}
-            >
-              <View style={{ height: H_HDR, alignItems: 'center', justifyContent: 'center' }}>
-                <Text style={[styles.finMonthHeader, m.isCurrent && styles.finMonthHeaderCurrent]}>
-                  {m.label}
-                </Text>
-                {m.isCurrent && <Text style={styles.finMtdLabel}>MTD</Text>}
-              </View>
-
-              <View style={{ height: H_DIV, justifyContent: 'center', paddingHorizontal: 6 }}>
-                <View style={[styles.finBoxLine, m.isCurrent && { backgroundColor: '#86efac' }]} />
-              </View>
-
-              {FIN_ROWS.map((row, idx) => {
-                if (!row) return (
-                  <View key={`d${idx}`} style={{ height: H_DIV, justifyContent: 'center', paddingHorizontal: 6 }}>
-                    <View style={[styles.finBoxLine, m.isCurrent && { backgroundColor: '#86efac' }]} />
-                  </View>
-                );
-                const val   = row.fmt(m.stats);
-                const color = row.getColor ? row.getColor(m.stats) : null;
-                return (
-                  <View key={row.key} style={{ height: H_ROW, alignItems: 'center', justifyContent: 'center' }}>
-                    <Text
-                      style={[
-                        styles.finMetricValue,
-                        row.bold && styles.finMetricValueBold,
-                        color && !disabled ? { color } : null,
-                      ]}
-                      numberOfLines={1}
-                      adjustsFontSizeToFit
-                      minimumFontScale={0.7}
-                    >
-                      {val}
-                    </Text>
-                  </View>
-                );
-              })}
-            </TouchableOpacity>
-          );
-        })}
+function CrewBox({ label, count, amount, accent, onPress, disabled }) {
+  if (disabled) {
+    return (
+      <View style={[styles.crewBox, styles.boxInactive]}>
+        <View style={[styles.invoiceAccentBar, { backgroundColor: '#e5e7eb' }]} />
+        <Text style={[styles.crewCount, styles.boxInactiveValue]}>0</Text>
+        <Text style={[styles.crewAmount, { color: '#d1d5db' }]}>{fmtK(0)}</Text>
+        <Text style={[styles.crewLabel, styles.boxInactiveLabel]}>{label}</Text>
       </View>
-    </View>
+    );
+  }
+  return (
+    <TouchableOpacity style={styles.crewBox} onPress={onPress} activeOpacity={0.72}>
+      <View style={[styles.invoiceAccentBar, { backgroundColor: accent }]} />
+      <Text style={[styles.crewCount, { color: accent }]}>{count}</Text>
+      <Text style={[styles.crewAmount, { color: accent }]}>{fmtK(amount)}</Text>
+      <Text style={styles.crewLabel}>{label}</Text>
+    </TouchableOpacity>
   );
 }
+
+function ReportRow({ icon, label, onPress }) {
+  return (
+    <TouchableOpacity style={styles.reportRow} onPress={onPress} activeOpacity={0.7}>
+      <View style={styles.reportRowLeft}>
+        <Ionicons name={icon} size={20} color={colors.primary} />
+        <Text style={styles.reportRowLabel}>{label}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+    </TouchableOpacity>
+  );
+}
+
+// ── Calendar Modal ─────────────────────────────────────────────────────────────
+
+function CalendarModal({ visible, jobs, onDayPress, onClose }) {
+  const [monthOffset, setMonthOffset] = useState(0);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, { dx, dy }) =>
+        Math.abs(dx) > 15 && Math.abs(dx) > Math.abs(dy),
+      onPanResponderRelease: (_, { dx }) => {
+        if      (dx >  60) setMonthOffset((m) => m - 1);
+        else if (dx < -60) setMonthOffset((m) => m + 1);
+      },
+    })
+  ).current;
+
+  useEffect(() => {
+    if (visible) setMonthOffset(0);
+  }, [visible]);
+
+  const now      = new Date();
+  const viewDate = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1);
+  const year     = viewDate.getFullYear();
+  const month    = viewDate.getMonth();
+  const todayStr = dateToStr(now);
+  const monthLabel = viewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const cells = buildCalendarDays(year, month, jobs);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <SafeAreaView style={calStyles.container}>
+        {/* Header */}
+        <View style={calStyles.header}>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="close" size={22} color={colors.textSecondary} />
+          </TouchableOpacity>
+          <View style={calStyles.monthNav}>
+            <TouchableOpacity onPress={() => setMonthOffset((m) => m - 1)} style={calStyles.navBtn}>
+              <Ionicons name="chevron-back" size={22} color={colors.textPrimary} />
+            </TouchableOpacity>
+            <Text style={calStyles.monthTitle}>{monthLabel}</Text>
+            <TouchableOpacity onPress={() => setMonthOffset((m) => m + 1)} style={calStyles.navBtn}>
+              <Ionicons name="chevron-forward" size={22} color={colors.textPrimary} />
+            </TouchableOpacity>
+          </View>
+          <View style={{ width: 22 }} />
+        </View>
+
+        {/* Day-of-week header row */}
+        <View style={calStyles.weekDayRow}>
+          {['S','M','T','W','T','F','S'].map((d, i) => (
+            <Text key={i} style={calStyles.weekDayLabel}>{d}</Text>
+          ))}
+        </View>
+
+        {/* Calendar grid — horizontal swipe switches month */}
+        <View style={calStyles.grid} {...panResponder.panHandlers}>
+          {cells.map((cell, i) => {
+            if (!cell) return <View key={`e${i}`} style={calStyles.cell} />;
+            const hasJobs  = cell.count > 0;
+            const isToday  = cell.dateStr === todayStr;
+            const accent   = hasJobs ? (cell.allHaveCrew ? '#16a34a' : '#dc2626') : null;
+            return (
+              <TouchableOpacity
+                key={cell.dateStr}
+                style={[
+                  calStyles.cell,
+                  isToday && calStyles.cellToday,
+                  hasJobs && { backgroundColor: cell.allHaveCrew ? 'rgba(22,163,74,0.1)' : 'rgba(220,38,38,0.1)' },
+                ]}
+                onPress={hasJobs ? () => { onDayPress(cell.dateStr); onClose(); } : undefined}
+                activeOpacity={hasJobs ? 0.7 : 1}
+              >
+                <Text style={[
+                  calStyles.cellDay,
+                  isToday && calStyles.cellDayToday,
+                  hasJobs && { color: accent, fontWeight: '700' },
+                ]}>
+                  {cell.day}
+                </Text>
+                {hasJobs && (
+                  <View style={[calStyles.jobBadge, { backgroundColor: accent }]}>
+                    <Text style={calStyles.jobBadgeText}>{cell.count}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {/* Legend */}
+        <View style={calStyles.legend}>
+          <View style={calStyles.legendItem}>
+            <View style={[calStyles.legendDot, { backgroundColor: '#16a34a' }]} />
+            <Text style={calStyles.legendLabel}>Crew assigned</Text>
+          </View>
+          <View style={calStyles.legendItem}>
+            <View style={[calStyles.legendDot, { backgroundColor: '#dc2626' }]} />
+            <Text style={calStyles.legendLabel}>Missing crew</Text>
+          </View>
+          <View style={calStyles.legendItem}>
+            <View style={[calStyles.legendDot, { backgroundColor: colors.primary, borderWidth: 2, borderColor: colors.primary }]} />
+            <Text style={calStyles.legendLabel}>Today</Text>
+          </View>
+        </View>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const calStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#fff' },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  monthNav: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  navBtn: { padding: 4 },
+  monthTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary, minWidth: 150, textAlign: 'center' },
+  weekDayRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 8,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  weekDayLabel: {
+    width: '14.2857%',
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 8,
+    paddingBottom: 16,
+  },
+  cell: {
+    width: '14.2857%',
+    height: 58,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    marginVertical: 1,
+  },
+  cellToday: {
+    borderWidth: 2,
+    borderColor: colors.primary,
+  },
+  cellDay: {
+    fontSize: 14,
+    color: colors.textPrimary,
+    fontWeight: '400',
+  },
+  cellDayToday: { color: colors.primary, fontWeight: '800' },
+  jobBadge: {
+    marginTop: 3,
+    minWidth: 18,
+    height: 15,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  jobBadgeText: { fontSize: 9, fontWeight: '800', color: '#fff' },
+  legend: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 18,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+    marginTop: 4,
+  },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  legendLabel: { fontSize: 12, color: colors.textSecondary, fontWeight: '500' },
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f9fafb' },
@@ -430,15 +661,18 @@ const styles = StyleSheet.create({
   logoImage: { height: 50, width: 200, resizeMode: 'contain' },
   headerDate: { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
 
-  sectionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 10, letterSpacing: 0.2 },
+  sectionTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  sectionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, letterSpacing: 0.2 },
 
   threeRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
+  fourRow:  { flexDirection: 'row', gap: 8,  marginBottom: 20 },
 
   pipelineBox: {
     flex: 1,
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -447,9 +681,18 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   pipelineValue: { fontSize: 28, fontWeight: '800' },
-  pipelineLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 4, textAlign: 'center', fontWeight: '500' },
+  pipelineLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 2, textAlign: 'center', fontWeight: '500' },
 
-  boxDisabled: { opacity: 0.42 },
+  boxInactive: {
+    backgroundColor: '#f9fafb',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderStyle: 'dashed',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  boxInactiveValue: { color: '#9ca3af' },
+  boxInactiveLabel: { color: '#9ca3af' },
 
   weekRow: { flexDirection: 'row', gap: 6, marginBottom: 20 },
   dayBox: {
@@ -493,7 +736,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     alignItems: 'center',
     overflow: 'hidden',
     shadowColor: '#000',
@@ -511,13 +755,35 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 12,
     borderTopRightRadius: 12,
   },
-  invoiceValue: { fontSize: 28, fontWeight: '800', marginTop: 8 },
-  invoiceLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 4, textAlign: 'center', fontWeight: '500' },
+  invoiceValue: { fontSize: 28, fontWeight: '800', marginTop: 5 },
+  invoiceValueCompact: { fontSize: 22, marginTop: 4 },
+  invoiceLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 2, textAlign: 'center', fontWeight: '500' },
+  invoiceLabelCompact: { fontSize: 9 },
 
-  finTable: {
+  crewBox: {
+    flex: 1,
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 12,
+    paddingTop: 11,
+    paddingBottom: 8,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.07,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  crewCount:  { fontSize: 22, fontWeight: '800', marginTop: 2 },
+  crewAmount: { fontSize: 13, fontWeight: '700', marginTop: 1 },
+  crewLabel:  { fontSize: 9, color: colors.textSecondary, marginTop: 2, textAlign: 'center', fontWeight: '500' },
+
+  reportsCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 4,
     marginBottom: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -525,30 +791,13 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  finTableInner: { flexDirection: 'row', gap: 6 },
-  finLabels: { width: 66 },
-  finMonthBox: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    overflow: 'hidden',
+  reportsDivider: { height: 1, backgroundColor: '#f3f4f6' },
+  reportRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
   },
-  finMonthBoxCurrent: { backgroundColor: '#f0fdf4', borderColor: '#86efac' },
-  finMonthBoxDisabled: { opacity: 0.4 },
-  finMonthHeader: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: colors.textMuted,
-    textAlign: 'center',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  finMonthHeaderCurrent: { color: colors.primary },
-  finMtdLabel: { fontSize: 8, fontWeight: '700', color: colors.primary, letterSpacing: 0.5, marginTop: 1 },
-  finBoxLine: { height: 1, backgroundColor: '#e5e7eb' },
-  finMetricLabel: { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
-  finMetricValue: { fontSize: 11, color: colors.textPrimary, fontWeight: '600', textAlign: 'center' },
-  finMetricValueBold: { fontWeight: '800', fontSize: 12 },
+  reportRowLeft:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  reportRowLabel: { fontSize: 15, fontWeight: '500', color: colors.textPrimary },
 });
