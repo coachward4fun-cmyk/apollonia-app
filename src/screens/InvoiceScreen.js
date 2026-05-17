@@ -4,12 +4,19 @@ import {
   TouchableOpacity, Modal, TextInput, KeyboardAvoidingView,
   Platform, Alert, RefreshControl, ActivityIndicator,
 } from 'react-native';
+import DatePickerField from '../components/DatePickerField';
 import { sendInvoiceEmail } from '../utils/sendInvoiceEmail';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeJobs, subscribeCrews, saveJob, getExpenses } from '../services/db';
+import { saveJob, getExpenses, getJobTypes, subscribeCompanyProfile, getNextInvoiceNumber } from '../services/db';
+import { useAppData } from '../context/AppDataContext';
+import {
+  today, addDays, formatDate, fmtWhole, fmtDecimal, lineTotal, calcTotals, detectTaxRate,
+} from '../utils/invoiceFormat';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
+import { statusStyle } from '../theme/statusColors';
+import { openInMaps } from '../utils/openInMaps';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -23,99 +30,28 @@ const DEFAULT_LINE_ITEMS = [
   { description: 'Clean up and haul away all debris',     qty: '1',  unitPrice: '0'   },
 ];
 
-const STATUS_STYLE = {
-  'not scheduled':  { bg: '#f3f4f6', fg: '#6b7280' },
-  'scheduled':      { bg: '#dbeafe', fg: '#2563eb' },
-  'in progress':    { bg: '#dcfce7', fg: colors.primary },
-  'invoice ready':  { bg: '#dbeafe', fg: '#2563eb' },
-  'invoice sent':   { bg: '#fef3c7', fg: '#d97706' },
-  'invoice paid':   { bg: '#dcfce7', fg: colors.primary },
-  'completed':      { bg: '#f3f4f6', fg: '#6b7280' },
-};
 
-function statusStyle(s) {
-  return STATUS_STYLE[(s || '').toLowerCase()] || { bg: '#f3f4f6', fg: '#6b7280' };
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-function today() { return new Date().toISOString().slice(0, 10); }
-
-function addDays(dateStr, n) {
-  const d = new Date((dateStr || today()) + 'T00:00:00');
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-function formatDate(str) {
-  if (!str) return '—';
-  const d = new Date(str + 'T00:00:00');
-  if (isNaN(d)) return str;
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
-function fmtWhole(n) {
-  if (!n && n !== 0) return '$0';
-  return '$' + Math.round(Number(n)).toLocaleString('en-US');
-}
-
-function fmtDecimal(n) {
-  if (!n && n !== 0) return '$0.00';
-  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function lineTotal(item) {
-  return (parseFloat(item.qty) || 0) * (parseFloat(item.unitPrice) || 0);
-}
-
-function calcTotals(items, taxRateNum = 7) {
-  const subtotal = items.reduce((s, item) => s + lineTotal(item), 0);
-  const tax      = subtotal * (taxRateNum / 100);
-  const total    = subtotal + tax;
-  return { subtotal, tax, total };
-}
-
-function detectTaxRate(address) {
-  if (!address) return { rate: 7.0, label: '' };
-  const addr = address.toUpperCase();
-  const inNE = /\bNE\b/.test(addr) || addr.includes('NEBRASKA');
-  const inIA = /\bIA\b/.test(addr) || addr.includes('IOWA');
-  const inSD = /\bSD\b/.test(addr) || addr.includes('SOUTH DAKOTA');
-  const inMO = /\bMO\b/.test(addr) || addr.includes('MISSOURI');
-  if (inNE) return addr.includes('OMAHA') ? { rate: 7.0, label: 'Omaha NE' } : { rate: 5.5, label: 'Nebraska' };
-  if (inIA) return { rate: 0, label: 'Iowa' };
-  if (inSD) return { rate: 0, label: 'South Dakota' };
-  if (inMO) return { rate: 0, label: 'Missouri' };
-  return { rate: 7.0, label: '' };
-}
-
-function generateInvoiceNumber(jobs) {
-  const d   = new Date();
-  const yy  = String(d.getFullYear()).slice(2);
-  const doy = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
-  const ddd = String(doy).padStart(3, '0');
-  const n   = (jobs.filter((j) => j.invoiceTotal != null).length + 1).toString().padStart(3, '0');
-  return `${yy}${ddd}-${n}`;
-}
+// Helpers live in src/utils/invoiceFormat.js.
 
 // ── Main screen ────────────────────────────────────────────────────────────────
 
 export default function InvoiceScreen() {
   const navigation   = useNavigation();
   const route        = useRoute();
+  const { activeJobs: jobs, crews } = useAppData();
 
-  const [jobs,           setJobs]          = useState([]);
-  const [crews,          setCrews]         = useState([]);
+  const [companyProfile, setCompanyProfile] = useState(null);
   const [refreshing,     setRefreshing]    = useState(false);
   const [showWizard,     setShowWizard]    = useState(false);
   const [showJobPicker,  setShowJobPicker] = useState(false);
   const [selectedJobId,  setSelectedJobId] = useState(null);
   const [statusFilter,   setStatusFilter]  = useState(null);
+  const [invMode,        setInvMode]       = useState('all');
+  const [invPage,        setInvPage]       = useState(1);
 
   useEffect(() => {
-    const unsubJobs  = subscribeJobs(setJobs);
-    const unsubCrews = subscribeCrews(setCrews);
-    return () => { unsubJobs(); unsubCrews(); };
+    const unsubProfile = subscribeCompanyProfile(setCompanyProfile);
+    return () => { unsubProfile(); };
   }, []);
 
   useEffect(() => {
@@ -136,6 +72,8 @@ export default function InvoiceScreen() {
     navigation.setParams({ preselectedJobId: null });
   }, [route.params?.preselectedJobId, jobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => { setInvPage(1); }, [invMode, statusFilter]);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     setTimeout(() => setRefreshing(false), 600);
@@ -143,14 +81,25 @@ export default function InvoiceScreen() {
 
   const crewMap = Object.fromEntries(crews.map((c) => [c.id, c.name]));
 
-  const allSorted = [
-    ...jobs.filter((j) => j.invoiceTotal != null).sort((a, b) => (b.invoiceDate || '').localeCompare(a.invoiceDate || '')),
-    ...jobs.filter((j) => j.invoiceTotal == null).sort((a, b) => (a.targetDate || '').localeCompare(b.targetDate || '')),
-  ];
+  const invoicedJobs = [...jobs]
+    .filter((j) => !!j.invoiceNumber)
+    .sort((a, b) => (b.invoiceDate || b.targetDate || '').localeCompare(a.invoiceDate || a.targetDate || ''));
+
+  const modeFiltered = invMode === 'unpaid'
+    ? invoicedJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return s !== 'invoice paid' && s !== 'cancelled';
+      })
+    : invMode === 'paid'
+    ? invoicedJobs.filter((j) => (j.status || '').toLowerCase() === 'invoice paid')
+    : invoicedJobs;
 
   const displayedJobs = statusFilter
-    ? allSorted.filter((j) => (j.status || '').toLowerCase() === statusFilter.toLowerCase())
-    : allSorted;
+    ? modeFiltered.filter((j) => (j.status || '').toLowerCase() === statusFilter.toLowerCase())
+    : modeFiltered;
+
+  const visibleJobs = displayedJobs.slice(0, invPage * 25);
+  const hasMoreJobs = visibleJobs.length < displayedJobs.length;
 
   const selectedJob = jobs.find((j) => j.id === selectedJobId) || null;
 
@@ -185,6 +134,27 @@ export default function InvoiceScreen() {
         </TouchableOpacity>
       </View>
 
+      <View style={styles.invModeToggle}>
+        <TouchableOpacity
+          style={[styles.invModeBtn, invMode === 'all' && styles.invModeBtnActive]}
+          onPress={() => setInvMode('all')}
+        >
+          <Text style={[styles.invModeBtnText, invMode === 'all' && styles.invModeBtnTextActive]}>All</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.invModeBtn, invMode === 'unpaid' && styles.invModeBtnActive]}
+          onPress={() => setInvMode('unpaid')}
+        >
+          <Text style={[styles.invModeBtnText, invMode === 'unpaid' && styles.invModeBtnTextActive]}>Unpaid</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.invModeBtn, invMode === 'paid' && styles.invModeBtnActive]}
+          onPress={() => setInvMode('paid')}
+        >
+          <Text style={[styles.invModeBtnText, invMode === 'paid' && styles.invModeBtnTextActive]}>Paid</Text>
+        </TouchableOpacity>
+      </View>
+
       {statusFilter ? (
         <View style={styles.filterBanner}>
           <Ionicons name="filter" size={13} color="#2563eb" />
@@ -205,22 +175,36 @@ export default function InvoiceScreen() {
         {displayedJobs.length === 0 ? (
           <View style={styles.empty}>
             <Ionicons name="receipt-outline" size={52} color={colors.textMuted} />
-            <Text style={styles.emptyTitle}>{statusFilter ? 'No matching jobs' : 'No jobs yet'}</Text>
+            <Text style={styles.emptyTitle}>
+              {invMode === 'unpaid' ? 'No unpaid invoices' : invMode === 'paid' ? 'No paid invoices' : 'No invoices yet'}
+            </Text>
             <Text style={styles.emptySub}>
-              {statusFilter
-                ? 'No jobs match this filter. Tap × to clear.'
-                : 'Add jobs from the Jobs screen, then return here to create invoices.'}
+              {invMode === 'unpaid'
+                ? 'All invoices are paid or cancelled.'
+                : invMode === 'paid'
+                ? 'No invoices have been marked as paid yet.'
+                : 'Create an invoice by tapping +.'}
             </Text>
           </View>
         ) : (
-          displayedJobs.map((job) => (
-            <JobCard
-              key={job.id}
-              job={job}
-              crewName={crewMap[job.crewId] || null}
-              onEdit={() => handleEditJob(job.id)}
-            />
-          ))
+          <>
+            {visibleJobs.map((job) => (
+              <JobCard
+                key={job.id}
+                job={job}
+                crewName={crewMap[job.crewId] || null}
+                onEdit={() => handleEditJob(job.id)}
+              />
+            ))}
+            {hasMoreJobs && (
+              <TouchableOpacity
+                style={styles.loadMoreBtn}
+                onPress={() => setInvPage((p) => p + 1)}
+              >
+                <Text style={styles.loadMoreText}>Load More</Text>
+              </TouchableOpacity>
+            )}
+          </>
         )}
         <View style={{ height: 32 }} />
       </ScrollView>
@@ -234,7 +218,7 @@ export default function InvoiceScreen() {
 
       <InvoiceWizard
         visible={showWizard}
-        jobs={jobs}
+        companyProfile={companyProfile}
         preselectedJob={selectedJob}
         onClose={() => { setShowWizard(false); setSelectedJobId(null); }}
         onSave={handleSaveInvoice}
@@ -243,7 +227,7 @@ export default function InvoiceScreen() {
           setSelectedJobId(null);
           navigation.navigate('Jobs', {
             screen: 'JobForm',
-            params: { jobId, returnTo: 'invoiceDetails' },
+            params: { jobId, returnTo: 'invoicePreview' },
           });
         }}
       />
@@ -261,7 +245,10 @@ function JobCard({ job, crewName, onEdit }) {
   return (
     <View style={styles.jobCard}>
       <View style={styles.jobCardTop}>
-        <Text style={styles.jobCardTitle} numberOfLines={1}>{job.projectName || 'Untitled'}</Text>
+        <View style={{ flex: 1 }}>
+          {job.jobId ? <Text style={styles.jobIdLabel}>Job {job.jobId}</Text> : null}
+          <Text style={styles.jobCardTitle} numberOfLines={1}>{job.projectName || 'Untitled'}</Text>
+        </View>
         <View style={styles.jobCardTopRight}>
           {hasPhotos && (
             <Ionicons name="camera" size={15} color={colors.textMuted} style={{ marginRight: 6 }} />
@@ -269,6 +256,9 @@ function JobCard({ job, crewName, onEdit }) {
           <View style={[styles.statusBadge, { backgroundColor: sc.bg }]}>
             <Text style={[styles.statusText, { color: sc.fg }]}>{job.status || '—'}</Text>
           </View>
+          <TouchableOpacity style={styles.editIconBtn} onPress={onEdit} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="pencil-outline" size={16} color={colors.primary} />
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -287,10 +277,6 @@ function JobCard({ job, crewName, onEdit }) {
           </Text>
         </View>
       )}
-
-      <TouchableOpacity style={styles.editIconBtn} onPress={onEdit} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-        <Ionicons name="pencil-outline" size={16} color={colors.primary} />
-      </TouchableOpacity>
     </View>
   );
 }
@@ -299,7 +285,10 @@ function JobCard({ job, crewName, onEdit }) {
 
 function JobPickerModal({ visible, jobs, onSelect, onClose }) {
   const selectableJobs = [...jobs]
-    .filter((j) => (j.status || '').toLowerCase() !== 'invoice paid')
+    .filter((j) => {
+      const s = (j.status || '').toLowerCase();
+      return s !== 'invoice paid' && s !== 'cancelled';
+    })
     .sort((a, b) => {
       if (!a.targetDate && !b.targetDate) return 0;
       if (!a.targetDate) return 1;
@@ -335,9 +324,12 @@ function JobPickerModal({ visible, jobs, onSelect, onClose }) {
                   activeOpacity={0.75}
                 >
                   <View style={styles.pickerJobTop}>
-                    <Text style={styles.pickerJobTitle} numberOfLines={1}>
-                      {job.projectName || 'Untitled Job'}
-                    </Text>
+                    <View style={{ flex: 1 }}>
+                      {job.jobId ? <Text style={styles.pickerJobIdLabel}>Job {job.jobId}</Text> : null}
+                      <Text style={styles.pickerJobTitle} numberOfLines={1}>
+                        {job.projectName || 'Untitled Job'}
+                      </Text>
+                    </View>
                     <View style={[styles.statusBadge, { backgroundColor: sc.bg }]}>
                       <Text style={[styles.statusText, { color: sc.fg }]}>{job.status || '—'}</Text>
                     </View>
@@ -366,7 +358,7 @@ function JobPickerModal({ visible, jobs, onSelect, onClose }) {
 
 // ── InvoiceWizard ──────────────────────────────────────────────────────────────
 
-function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJob }) {
+function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSave, onEditJob }) {
   const [step,      setStep]      = useState(2);
   const [selJob,    setSelJob]    = useState(null);
   const [invNumber, setInvNumber] = useState('');
@@ -375,9 +367,14 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
   const [taxRate,   setTaxRate]   = useState('7');
   const [taxLabel,  setTaxLabel]  = useState('');
   const [lineItems, setLineItems] = useState(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
-  const [saving,    setSaving]    = useState(false);
-  const [sending,   setSending]   = useState(false);
+  const [saving,       setSaving]       = useState(false);
+  const [sending,      setSending]      = useState(false);
+  const [showSendConfirm, setShowSendConfirm] = useState(false);
+  const [sendProgress,    setSendProgress]    = useState({ done: 0, total: 0 });
+  const [toast,        setToast]        = useState('');
+  const [fixedInvoice, setFixedInvoice] = useState(false);
   const scrollRef = useRef(null);
+  const isPaid = (selJob?.status || '').toLowerCase() === 'invoice paid';
 
   useEffect(() => {
     if (!visible || !preselectedJob) return;
@@ -385,11 +382,21 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     const init = async () => {
       setSelJob(preselectedJob);
       setStep(2);
-      setInvNumber(preselectedJob.invoiceNumber || generateInvoiceNumber(jobs));
+
+      let nextNum = preselectedJob.invoiceNumber;
+      if (!nextNum) {
+        try {
+          nextNum = await getNextInvoiceNumber();
+        } catch (err) {
+          console.warn('[Invoice] getNextInvoiceNumber failed:', err.message);
+          nextNum = '';
+        }
+      }
+      setInvNumber(nextNum);
       setInvDate(preselectedJob.invoiceDate || today());
       setDueDate(preselectedJob.dueDate || addDays(today(), 30));
 
-      const detected = detectTaxRate(preselectedJob.jobLocationAddress);
+      const detected = detectTaxRate(preselectedJob.jobLocationAddress, companyProfile?.taxRates);
       const savedRate = preselectedJob.taxRate != null ? preselectedJob.taxRate : detected.rate;
       const savedLabel = preselectedJob.taxLabel != null ? preselectedJob.taxLabel : detected.label;
       setTaxRate(String(savedRate));
@@ -404,7 +411,21 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
         return;
       }
 
-      const baseItems = DEFAULT_LINE_ITEMS.map((i) => ({ ...i }));
+      let baseItems = [];
+      if (preselectedJob.jobType) {
+        try {
+          const allTypes = await getJobTypes();
+          const lName = (preselectedJob.jobType || '').toLowerCase();
+          const typeConfig = allTypes.find((t) => (t.name || '').toLowerCase() === lName);
+          if (typeConfig && typeConfig.lineItems && typeConfig.lineItems.length > 0) {
+            baseItems = typeConfig.lineItems.map((i) => ({
+              description: i.description,
+              qty:         String(i.qty ?? 0),
+              unitPrice:   String(i.unitPrice ?? 0),
+            }));
+          }
+        } catch { /* fall through with empty base */ }
+      }
 
       try {
         const allExp = await getExpenses();
@@ -437,13 +458,38 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     setLineItems(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
     setSaving(false);
     setSending(false);
+    setToast('');
+    setFixedInvoice(false);
   };
 
   const handleClose = () => { reset(); onClose(); };
 
   const handleNext = () => {
     if (step === 2) {
-      if (!invNumber.trim()) { Alert.alert('Required', 'Enter an invoice number.'); return; }
+      if (!isPaid && !invNumber.trim()) { Alert.alert('Required', 'Enter an invoice number.'); return; }
+      if (fixedInvoice) {
+        // Jump straight to preview — line items are carried over from original invoice.
+        // Back from preview goes to step 3 (line items) so they can still be edited.
+        const updatedJob = buildUpdatedJob('Invoice Ready');
+        setSelJob(updatedJob);
+        saveJob(updatedJob).catch((err) => {
+          console.warn('[Invoice] interim save failed:', err.message);
+          setToast(`Save failed — ${err.message || 'try again on the next step'}`);
+          setTimeout(() => setToast(''), 3500);
+        });
+        setStep(4);
+        scrollRef.current?.scrollTo({ y: 0, animated: false });
+        return;
+      }
+    }
+    if (step === 3 && !isPaid) {
+      const updatedJob = buildUpdatedJob('Invoice Ready');
+      setSelJob(updatedJob);
+      saveJob(updatedJob).catch((err) => {
+        console.warn('[Invoice] interim save failed:', err.message);
+        setToast(`Save failed — ${err.message || 'try again on the next step'}`);
+        setTimeout(() => setToast(''), 3500);
+      });
     }
     setStep((s) => s + 1);
     scrollRef.current?.scrollTo({ y: 0, animated: false });
@@ -455,6 +501,23 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     scrollRef.current?.scrollTo({ y: 0, animated: false });
   };
 
+  const handleSaveAndReturn = async () => {
+    if (!selJob) return;
+    const taxRateNum = parseFloat(taxRate) || 0;
+    const cleanItems = lineItems.map((i) => ({
+      description: i.description,
+      qty:         parseFloat(i.qty) || 0,
+      unitPrice:   parseFloat(i.unitPrice) || 0,
+    }));
+    try {
+      await saveJob({ ...selJob, lineItems: cleanItems, taxRate: taxRateNum });
+      setToast('Line items saved');
+      setTimeout(handleClose, 1200);
+    } catch (err) {
+      Alert.alert('Error', 'Could not save line items: ' + err.message);
+    }
+  };
+
   const updateItem = (index, field, value) => {
     setLineItems((prev) => prev.map((item, i) => i === index ? { ...item, [field]: value } : item));
   };
@@ -463,12 +526,49 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
     setLineItems((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const buildUpdatedJob = () => {
+  const handleFixInvoice = useCallback(() => {
+    if (!selJob) return;
+    const newNum = invNumber + 'C';
+    Alert.alert(
+      'Create Corrected Invoice',
+      `Create corrected invoice "${newNum}" with today's date, ready to edit and resend?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Create',
+          onPress: async () => {
+            const newInvDate = today();
+            const newDueDate = addDays(today(), 30);
+            const correctedJob = {
+              ...selJob,
+              status:        'Invoice Ready',
+              invoiceNumber: newNum,
+              invoiceDate:   newInvDate,
+              dueDate:       newDueDate,
+            };
+            setInvNumber(newNum);
+            setInvDate(newInvDate);
+            setDueDate(newDueDate);
+            setSelJob(correctedJob);
+            setFixedInvoice(true);
+            try {
+              await saveJob(correctedJob);
+              logActivity('invoice_corrected', `Corrected invoice ${invNumber} → ${newNum} for ${selJob.projectName || selJob.billToName || 'job'}`);
+            } catch (err) {
+              Alert.alert('Error', 'Could not create corrected invoice: ' + err.message);
+            }
+          },
+        },
+      ],
+    );
+  }, [selJob, invNumber]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const buildUpdatedJob = (status = 'Invoice Ready') => {
     const taxRateNum = parseFloat(taxRate) || 0;
     const { total } = calcTotals(lineItems, taxRateNum);
     return {
       ...selJob,
-      status:        'Invoice Ready',
+      status,
       invoiceNumber: invNumber.trim(),
       invoiceDate:   invDate,
       dueDate:       dueDate,
@@ -485,29 +585,77 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
 
   const handleSave = async () => {
     if (!selJob) return;
+    if (isPaid) { reset(); onClose(); return; }
     setSaving(true);
-    await onSave(buildUpdatedJob());
-    reset();
+    try {
+      const saveDate   = today();
+      const updatedJob = { ...buildUpdatedJob('Invoice Ready'), invoiceDate: saveDate, dueDate: addDays(saveDate, 30) };
+      await saveJob(updatedJob);
+      logActivity('invoice_created', `Invoice #${invNumber.trim()} for ${selJob.projectName || selJob.billToName || 'job'}`);
+      setSaving(false);
+      setToast('Invoice saved');
+      setTimeout(() => { reset(); onClose(); }, 1500);
+    } catch (err) {
+      setSaving(false);
+      Alert.alert('Error', 'Could not save invoice: ' + err.message);
+    }
   };
 
-  const handleSaveAndSend = async () => {
+  // Pre-flight: validate email then open the send confirmation modal. No
+  // network calls happen until the user explicitly confirms.
+  const handleSaveAndSend = () => {
     if (!selJob) return;
     if (!selJob.email) {
       Alert.alert('No Email Address', 'This customer has no email address on file. Add one to the job before sending.');
       return;
     }
+    setShowSendConfirm(true);
+  };
+
+  // Actual send — called from the confirmation modal's "Send to Customer" button.
+  const executeSendInvoice = async () => {
+    if (!selJob) return;
+    setShowSendConfirm(false);
     setSending(true);
-    const updatedJob = buildUpdatedJob();
+    setSendProgress({ done: 0, total: 0 });
+    const onProgress = (done, total) => setSendProgress({ done, total });
+
+    if (isPaid) {
+      // Resend locked invoice with exact saved values — no date override, no status change
+      try {
+        await sendInvoiceEmail(
+          selJob,
+          selJob.invoiceNumber || '',
+          selJob.invoiceDate   || '',
+          selJob.dueDate       || '',
+          selJob.lineItems     || [],
+          { onProgress },
+        );
+        setSending(false);
+        setToast('Invoice resent');
+        setTimeout(() => { reset(); onClose(); }, 2200);
+      } catch (err) {
+        setSending(false);
+        Alert.alert('Email Failed', err.message || 'Could not send the email.');
+      }
+      return;
+    }
+    const saveDate    = today();
+    const saveDue     = addDays(saveDate, 30);
+    const invoiceData = { ...buildUpdatedJob('Invoice Ready'), invoiceDate: saveDate, dueDate: saveDue };
     try {
-      await onSave(updatedJob);
-      await sendInvoiceEmail(updatedJob, invNumber.trim(), invDate, dueDate, updatedJob.lineItems);
-      logActivity('invoice_sent', `Invoice #${invNumber.trim()} sent to ${selJob.email}`);
-      reset();
-      Alert.alert('Email Sent ✓', `Invoice emailed to ${selJob.email}.`);
-    } catch (err) {
-      Alert.alert('Email Failed', err.message || 'Could not send the email. Invoice was saved.');
-    } finally {
+      // Send email first — only save if email succeeds
+      await sendInvoiceEmail(invoiceData, invNumber.trim(), saveDate, saveDue, invoiceData.lineItems, { onProgress });
+      // Email succeeded — save with Invoice Sent status
+      const sentJob = { ...invoiceData, status: 'Invoice Sent' };
+      await saveJob(sentJob);
+      logActivity('invoice_sent', `Sent invoice #${invNumber.trim()} to ${selJob.email}`);
       setSending(false);
+      setToast('Invoice sent and job status updated to Invoice Sent');
+      setTimeout(() => { reset(); onClose(); }, 2200);
+    } catch (err) {
+      setSending(false);
+      Alert.alert('Email Failed', err.message || 'Could not send the email. Invoice was not saved.');
     }
   };
 
@@ -526,7 +674,14 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
             <Text style={styles.wizardTitle}>{STEP_TITLES[step]}</Text>
             <StepDots step={step} total={4} />
           </View>
-          <View style={{ width: 34 }} />
+          {isPaid ? (
+            <View style={styles.lockBadge}>
+              <Ionicons name="lock-closed" size={12} color="#d97706" />
+              <Text style={styles.lockBadgeText}>Invoice Locked · Paid</Text>
+            </View>
+          ) : (
+            <View style={{ width: 34 }} />
+          )}
         </View>
 
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -534,91 +689,152 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
 
             {step === 2 && selJob && (
               <>
+                {isPaid && (
+                  <View style={styles.lockedBanner}>
+                    <Ionicons name="lock-closed" size={14} color="#d97706" />
+                    <Text style={styles.lockedBannerText}>Invoice Locked — Paid.</Text>
+                    <TouchableOpacity style={styles.fixInvoiceBtn} onPress={handleFixInvoice}>
+                      <Ionicons name="create-outline" size={13} color="#fff" />
+                      <Text style={styles.fixInvoiceBtnText}>Fix Invoice</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
                 <View style={styles.detailJobCard}>
+                  {selJob.jobId ? <Text style={styles.detailJobId}>Job {selJob.jobId}</Text> : null}
                   <Text style={styles.detailJobName}>{selJob.projectName}</Text>
                   <Text style={styles.detailJobCustomer}>{selJob.billToName}</Text>
-                  {selJob.jobLocationAddress ? <Text style={styles.detailJobAddr}>{selJob.jobLocationAddress}</Text> : null}
+                  {selJob.jobLocationAddress ? (
+                    <TouchableOpacity style={styles.detailJobAddrRow} onPress={() => openInMaps(selJob.jobLocationAddress)} activeOpacity={0.7}>
+                      <Text style={styles.detailJobAddr} numberOfLines={2}>{selJob.jobLocationAddress}</Text>
+                      <Ionicons name="earth-outline" size={14} color="#16a34a" style={{ marginLeft: 4 }} />
+                    </TouchableOpacity>
+                  ) : null}
                   {selJob.email ? <Text style={styles.detailJobEmail}>{selJob.email}</Text> : null}
                 </View>
 
-                <TouchableOpacity
-                  style={styles.editJobLink}
-                  onPress={() => onEditJob && onEditJob(selJob.id)}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons name="pencil-outline" size={14} color="#2563eb" />
-                  <Text style={styles.editJobLinkText}>Edit Job Details</Text>
-                </TouchableOpacity>
+                <View style={styles.editJobRow}>
+                  <TouchableOpacity
+                    style={styles.editJobLink}
+                    onPress={() => onEditJob && onEditJob(selJob.id)}
+                    activeOpacity={0.7}
+                  >
+                    {isPaid ? (
+                      <Ionicons name="lock-closed" size={14} color="#d97706" />
+                    ) : (
+                      <Ionicons name="pencil-outline" size={14} color="#2563eb" />
+                    )}
+                    <Text style={[styles.editJobLinkText, isPaid && { color: '#d97706' }]}>
+                      {isPaid ? 'Invoice Locked' : 'Edit Job Details'}
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={[styles.statusBadge, { backgroundColor: statusStyle(selJob.status).bg }]}>
+                    <Text style={[styles.statusText, { color: statusStyle(selJob.status).fg }]}>
+                      {selJob.status || '—'}
+                    </Text>
+                  </View>
+                </View>
 
                 <FormSection title="INVOICE NUMBER">
-                  <TextInput
-                    style={styles.detailInput}
-                    value={invNumber}
-                    onChangeText={setInvNumber}
-                    placeholder="e.g. 26123-001"
-                    placeholderTextColor={colors.textMuted}
-                    autoCapitalize="none"
-                    returnKeyType="next"
-                  />
+                  {isPaid ? (
+                    <View style={styles.lockedField}>
+                      <Text style={styles.lockedFieldText}>{invNumber}</Text>
+                      <Ionicons name="lock-closed" size={12} color={colors.textMuted} />
+                    </View>
+                  ) : (
+                    <TextInput
+                      style={styles.detailInput}
+                      value={invNumber}
+                      onChangeText={setInvNumber}
+                      placeholder="e.g. 26123-001"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="none"
+                      returnKeyType="next"
+                    />
+                  )}
                 </FormSection>
 
-                <FormSection title="INVOICE DATE">
-                  <TextInput
-                    style={styles.detailInput}
-                    value={invDate}
-                    onChangeText={(v) => { setInvDate(v); setDueDate(addDays(v, 30)); }}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor={colors.textMuted}
-                    keyboardType="numbers-and-punctuation"
-                    returnKeyType="next"
-                  />
-                </FormSection>
+                <View style={styles.formSection}>
+                  <Text style={styles.formSectionLabel}>INVOICE DATE</Text>
+                  <View pointerEvents={isPaid ? 'none' : 'auto'} style={isPaid ? { opacity: 0.65 } : undefined}>
+                    <DatePickerField
+                      value={invDate}
+                      onChange={(v) => { setInvDate(v); if (v) setDueDate(addDays(v, 30)); }}
+                      clearable={false}
+                    />
+                  </View>
+                </View>
 
-                <FormSection title="DUE DATE">
-                  <TextInput
-                    style={styles.detailInput}
-                    value={dueDate}
-                    onChangeText={setDueDate}
-                    placeholder="YYYY-MM-DD"
-                    placeholderTextColor={colors.textMuted}
-                    keyboardType="numbers-and-punctuation"
-                    returnKeyType="done"
-                  />
-                </FormSection>
+                <View style={styles.formSection}>
+                  <Text style={styles.formSectionLabel}>DUE DATE</Text>
+                  <View pointerEvents={isPaid ? 'none' : 'auto'} style={isPaid ? { opacity: 0.65 } : undefined}>
+                    <DatePickerField
+                      value={dueDate}
+                      onChange={setDueDate}
+                      clearable={false}
+                    />
+                  </View>
+                </View>
 
                 <FormSection title="TAX RATE (%)">
-                  <TextInput
-                    style={styles.detailInput}
-                    value={taxRate}
-                    onChangeText={(v) => {
-                      setTaxRate(v);
-                      // When manually overriding, clear auto-detected label so it doesn't mislead
-                    }}
-                    placeholder="7"
-                    placeholderTextColor={colors.textMuted}
-                    keyboardType="decimal-pad"
-                    selectTextOnFocus
-                    returnKeyType="done"
-                  />
+                  {isPaid ? (
+                    <View style={styles.lockedField}>
+                      <Text style={styles.lockedFieldText}>{taxRate}%{taxLabel ? ` - ${taxLabel}` : ''}</Text>
+                      <Ionicons name="lock-closed" size={12} color={colors.textMuted} />
+                    </View>
+                  ) : (
+                    <TextInput
+                      style={styles.detailInput}
+                      value={taxRate}
+                      onChangeText={(v) => {
+                        setTaxRate(v);
+                        // When manually overriding, clear auto-detected label so it doesn't mislead
+                      }}
+                      placeholder="7"
+                      placeholderTextColor={colors.textMuted}
+                      keyboardType="decimal-pad"
+                      selectTextOnFocus
+                      returnKeyType="done"
+                    />
+                  )}
                 </FormSection>
-                {taxLabel ? (
+                {!isPaid && taxLabel ? (
                   <Text style={styles.taxHint}>Auto-detected: {taxLabel}</Text>
                 ) : null}
 
-                <NextButton label="Next: Line Items →" onPress={handleNext} />
+                <NextButton
+                  label={fixedInvoice ? 'Save & Preview Invoice →' : 'Next: Line Items →'}
+                  onPress={handleNext}
+                />
+                {fixedInvoice && (
+                  <TouchableOpacity
+                    style={styles.editLineItemsLink}
+                    onPress={() => { setFixedInvoice(false); }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Text style={styles.editLineItemsLinkText}>Edit line items first →</Text>
+                  </TouchableOpacity>
+                )}
               </>
             )}
 
             {step === 3 && (
               <>
-                <Text style={styles.lineItemsHint}>Edit quantities and prices. Lines with qty 0 are excluded.</Text>
+                {isPaid && (
+                  <View style={styles.lockedBanner}>
+                    <Ionicons name="lock-closed" size={14} color="#d97706" />
+                    <Text style={styles.lockedBannerText}>Invoice Locked — Paid. Line items cannot be edited.</Text>
+                  </View>
+                )}
+                <Text style={styles.lineItemsHint}>
+                  {isPaid ? 'These are the exact invoiced amounts.' : 'Edit quantities and prices. Lines with qty 0 are excluded.'}
+                </Text>
 
                 {lineItems.map((item, i) => {
                   const lt = lineTotal(item);
                   return (
                     <View key={i} style={[styles.lineItemCard, item._isExpense && styles.lineItemCardExpense]}>
                       <View style={styles.lineItemDescRow}>
-                        {item._isExpense ? (
+                        {!isPaid && item._isExpense ? (
                           <TextInput
                             style={[styles.lineItemDesc, styles.lineItemDescInput]}
                             value={item.description}
@@ -630,37 +846,47 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
                         ) : (
                           <Text style={styles.lineItemDesc}>{item.description}</Text>
                         )}
-                        <TouchableOpacity
-                          onPress={() => removeItem(i)}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          style={styles.lineItemRemoveBtn}
-                        >
-                          <Ionicons name="close-circle" size={17} color="#9ca3af" />
-                        </TouchableOpacity>
+                        {!isPaid && (
+                          <TouchableOpacity
+                            onPress={() => removeItem(i)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            style={styles.lineItemRemoveBtn}
+                          >
+                            <Ionicons name="close-circle" size={17} color="#9ca3af" />
+                          </TouchableOpacity>
+                        )}
                       </View>
                       <View style={styles.lineItemRow}>
                         <View style={styles.lineItemField}>
                           <Text style={styles.lineItemFieldLabel}>Qty</Text>
-                          <TextInput
-                            style={styles.lineItemInput}
-                            value={item.qty}
-                            onChangeText={(v) => updateItem(i, 'qty', v)}
-                            keyboardType="decimal-pad"
-                            selectTextOnFocus
-                          />
+                          {isPaid ? (
+                            <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>{item.qty}</Text>
+                          ) : (
+                            <TextInput
+                              style={styles.lineItemInput}
+                              value={item.qty}
+                              onChangeText={(v) => updateItem(i, 'qty', v)}
+                              keyboardType="decimal-pad"
+                              selectTextOnFocus
+                            />
+                          )}
                         </View>
                         <Text style={styles.lineItemTimes}>×</Text>
                         <View style={styles.lineItemField}>
                           <Text style={styles.lineItemFieldLabel}>Price</Text>
                           <View style={styles.lineItemPriceWrap}>
                             <Text style={styles.lineItemDollar}>$</Text>
-                            <TextInput
-                              style={styles.lineItemInput}
-                              value={item.unitPrice}
-                              onChangeText={(v) => updateItem(i, 'unitPrice', v)}
-                              keyboardType="decimal-pad"
-                              selectTextOnFocus
-                            />
+                            {isPaid ? (
+                              <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>{item.unitPrice}</Text>
+                            ) : (
+                              <TextInput
+                                style={styles.lineItemInput}
+                                value={item.unitPrice}
+                                onChangeText={(v) => updateItem(i, 'unitPrice', v)}
+                                keyboardType="decimal-pad"
+                                selectTextOnFocus
+                              />
+                            )}
                           </View>
                         </View>
                         <Text style={styles.lineItemTimes}>=</Text>
@@ -672,11 +898,44 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
                   );
                 })}
 
-                <View style={styles.subtotalBar}>
-                  <Text style={styles.subtotalLabel}>Subtotal</Text>
-                  <Text style={styles.subtotalValue}>{fmtDecimal(subtotal)}</Text>
+                <View style={styles.taxSummaryCard}>
+                  <View style={styles.taxRateRow}>
+                    <Text style={styles.taxRateLabel}>Tax Rate</Text>
+                    <View style={styles.taxRateInputWrap}>
+                      {isPaid ? (
+                        <Text style={[styles.taxRateInput, { color: colors.textSecondary, paddingVertical: 8 }]}>{taxRate}</Text>
+                      ) : (
+                        <TextInput
+                          style={styles.taxRateInput}
+                          value={taxRate}
+                          onChangeText={setTaxRate}
+                          keyboardType="decimal-pad"
+                          selectTextOnFocus
+                        />
+                      )}
+                      <Text style={styles.taxRatePct}>%</Text>
+                    </View>
+                  </View>
+                  <View style={styles.taxSummaryDivider} />
+                  <View style={styles.taxSummaryLine}>
+                    <Text style={styles.taxSummaryLineLabel}>Subtotal</Text>
+                    <Text style={styles.taxSummaryLineValue}>{fmtDecimal(subtotal)}</Text>
+                  </View>
+                  <View style={styles.taxSummaryLine}>
+                    <Text style={styles.taxSummaryLineLabel}>Tax ({taxRate}%)</Text>
+                    <Text style={styles.taxSummaryLineValue}>{fmtDecimal(tax)}</Text>
+                  </View>
+                  <View style={[styles.taxSummaryLine, styles.taxSummaryTotal]}>
+                    <Text style={styles.taxSummaryTotalLabel}>Total</Text>
+                    <Text style={styles.taxSummaryTotalValue}>{fmtDecimal(total)}</Text>
+                  </View>
                 </View>
 
+                {!isPaid && (
+                  <TouchableOpacity style={styles.saveReturnBtn} onPress={handleSaveAndReturn}>
+                    <Text style={styles.saveReturnBtnText}>Save and Return</Text>
+                  </TouchableOpacity>
+                )}
                 <NextButton label="Next: Preview →" onPress={handleNext} />
               </>
             )}
@@ -684,12 +943,16 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
             {step === 4 && selJob && (
               <>
                 <View style={styles.previewHeader}>
-                  <View>
-                    <Text style={styles.previewCompany}>Apollonia Construction</Text>
-                    <Text style={styles.previewCompanySub}>Omaha, NE</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.previewCompany}>{companyProfile?.companyName || '—'}</Text>
+                    {companyProfile?.address ? (
+                      <Text style={styles.previewCompanySub}>{companyProfile.address}</Text>
+                    ) : null}
                   </View>
-                  <View style={styles.previewInvoiceLabel}>
-                    <Text style={styles.previewInvoiceLabelText}>INVOICE</Text>
+                  <View style={{ marginRight: 28 }}>
+                    <View style={styles.previewInvoiceLabel}>
+                      <Text style={styles.previewInvoiceLabelText}>INVOICE</Text>
+                    </View>
                   </View>
                 </View>
 
@@ -709,8 +972,15 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
 
                 <View style={styles.previewProjectCard}>
                   <Text style={styles.previewMetaHead}>Project</Text>
+                  {selJob.jobId ? <Text style={styles.previewJobIdLabel}>Job {selJob.jobId}</Text> : null}
                   <Text style={styles.previewMetaVal}>{selJob.projectName}</Text>
-                  {selJob.jobLocationAddress ? <Text style={styles.previewMetaSub}>{selJob.jobLocationAddress}</Text> : null}
+                  {selJob.jobLocationAddress ? (
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }} onPress={() => openInMaps(selJob.jobLocationAddress)} activeOpacity={0.7}>
+                      <Text style={styles.previewMetaSub}>{selJob.jobLocationAddress}</Text>
+                      <Ionicons name="earth-outline" size={12} color="#16a34a" />
+                    </TouchableOpacity>
+                  ) : null}
+                  {selJob.targetDate ? <Text style={styles.previewMetaSub}>Job Date: {formatDate(selJob.targetDate)}</Text> : null}
                 </View>
 
                 <View style={styles.previewTable}>
@@ -732,24 +1002,51 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
                     ))}
                 </View>
 
-                <View style={styles.totalsCard}>
-                  <TotalRow label="Subtotal" value={fmtDecimal(subtotal)} />
-                  <TotalRow label={`Tax (${taxDisplay})`} value={fmtDecimal(tax)} />
-                  <View style={styles.totalsDivider} />
-                  <TotalRow label="Total" value={fmtDecimal(total)} bold />
+                <View style={styles.previewBottomRow}>
+                  <View style={styles.previewPaymentSide}>
+                    <Text style={styles.previewMetaHead}>Send Payment To</Text>
+                    <Text style={styles.previewMetaVal}>{companyProfile?.companyName || '—'}</Text>
+                    {companyProfile?.address       ? <Text style={styles.previewMetaSub}>{companyProfile.address}</Text>       : null}
+                    {companyProfile?.billingEmail  ? <Text style={styles.previewMetaSub}>{companyProfile.billingEmail}</Text>  : null}
+                    {companyProfile?.phone         ? <Text style={styles.previewMetaSub}>{companyProfile.phone}</Text>         : null}
+                  </View>
+                  <View style={styles.previewTotalsSide}>
+                    <TotalRow label="Subtotal" value={fmtDecimal(subtotal)} />
+                    <View style={styles.totalRow}>
+                      <View>
+                        <Text style={styles.totalLabel}>Tax</Text>
+                        <Text style={styles.taxSubLabel}>{taxDisplay}</Text>
+                      </View>
+                      <Text style={styles.totalValue}>{fmtDecimal(tax)}</Text>
+                    </View>
+                    <View style={styles.totalsDivider} />
+                    <View style={styles.totalDueBlock}>
+                      <Text style={styles.totalValueBold}>{fmtDecimal(total)}</Text>
+                      <Text style={styles.totalDueLabel}>Total Due</Text>
+                    </View>
+                  </View>
                 </View>
+
+                <TouchableOpacity
+                  style={styles.photosBtn}
+                  onPress={() => onEditJob && onEditJob(selJob.id)}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons name="camera-outline" size={18} color="#2563eb" />
+                  <Text style={styles.photosBtnText}>View / Add Photos</Text>
+                </TouchableOpacity>
 
                 <View style={styles.saveBtnRow}>
                   <TouchableOpacity
                     style={[styles.saveBtnOutline, (saving || sending) && styles.saveBtnDisabled]}
-                    onPress={handleSave}
+                    onPress={isPaid ? handleClose : handleSave}
                     disabled={saving || sending}
                   >
                     {saving
                       ? <ActivityIndicator color={colors.primary} size="small" />
                       : <>
-                          <Ionicons name="save-outline" size={18} color={colors.primary} />
-                          <Text style={styles.saveBtnOutlineText}>Save</Text>
+                          <Ionicons name={isPaid ? 'close-outline' : 'save-outline'} size={18} color={colors.primary} />
+                          <Text style={styles.saveBtnOutlineText}>{isPaid ? 'Close' : 'Save'}</Text>
                         </>}
                   </TouchableOpacity>
 
@@ -762,16 +1059,83 @@ function InvoiceWizard({ visible, jobs, preselectedJob, onClose, onSave, onEditJ
                       ? <ActivityIndicator color="#fff" size="small" />
                       : <>
                           <Ionicons name="send-outline" size={18} color="#fff" />
-                          <Text style={styles.saveBtnText}>Save & Send</Text>
+                          <Text style={styles.saveBtnText}>{isPaid ? 'Resend Invoice' : 'Save & Send'}</Text>
                         </>}
                   </TouchableOpacity>
                 </View>
+
+                {sending && (
+                  <View style={styles.sendingProgress}>
+                    <ActivityIndicator size="small" color={colors.textMuted} />
+                    <Text style={styles.sendingProgressText}>
+                      {sendProgress.total > 0 && sendProgress.done < sendProgress.total
+                        ? `Embedding photo ${sendProgress.done + 1} of ${sendProgress.total}…`
+                        : 'Preparing invoice…'}
+                    </Text>
+                  </View>
+                )}
               </>
             )}
 
             <View style={{ height: 40 }} />
           </ScrollView>
         </KeyboardAvoidingView>
+
+        {toast ? (
+          <View style={styles.toastWrap} pointerEvents="none">
+            <Ionicons name="checkmark-circle" size={18} color="#fff" />
+            <Text style={styles.toastText}>{toast}</Text>
+          </View>
+        ) : null}
+
+        {/* Send-to-customer confirmation modal — last gate before the email actually fires. */}
+        <Modal
+          visible={showSendConfirm}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowSendConfirm(false)}
+        >
+          <View style={styles.sendConfirmBackdrop}>
+            <View style={styles.sendConfirmCard}>
+              <View style={styles.sendConfirmIconWrap}>
+                <Ionicons name="mail-outline" size={26} color={colors.primary} />
+              </View>
+              <Text style={styles.sendConfirmTitle}>Send invoice to customer?</Text>
+              <Text style={styles.sendConfirmSub}>Review before sending. This will email the invoice and mark the job as Invoice Sent.</Text>
+
+              <View style={styles.sendConfirmRow}>
+                <Text style={styles.sendConfirmLabel}>To</Text>
+                <Text style={styles.sendConfirmValue} numberOfLines={1}>{selJob?.email || '—'}</Text>
+              </View>
+              <View style={styles.sendConfirmRow}>
+                <Text style={styles.sendConfirmLabel}>Invoice #</Text>
+                <Text style={styles.sendConfirmValue}>{invNumber || '—'}</Text>
+              </View>
+              <View style={styles.sendConfirmRow}>
+                <Text style={styles.sendConfirmLabel}>Total</Text>
+                <Text style={[styles.sendConfirmValue, { color: colors.primary, fontWeight: '800' }]}>
+                  {fmtDecimal(total)}
+                </Text>
+              </View>
+
+              <View style={styles.sendConfirmBtnRow}>
+                <TouchableOpacity
+                  style={[styles.sendConfirmBtn, styles.sendConfirmBtnCancel]}
+                  onPress={() => setShowSendConfirm(false)}
+                >
+                  <Text style={styles.sendConfirmBtnCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sendConfirmBtn, styles.sendConfirmBtnSend]}
+                  onPress={executeSendInvoice}
+                >
+                  <Ionicons name="send" size={15} color="#fff" />
+                  <Text style={styles.sendConfirmBtnSendText}>Send to Customer</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
       </SafeAreaView>
     </Modal>
   );
@@ -817,7 +1181,14 @@ function PreviewRow({ label, value }) {
   return (
     <View style={styles.previewRow}>
       <Text style={styles.previewRowLabel}>{label}</Text>
-      <Text style={styles.previewRowValue}>{value}</Text>
+      <Text
+        style={styles.previewRowValue}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontSize={8}
+      >
+        {value}
+      </Text>
     </View>
   );
 }
@@ -855,6 +1226,36 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  invModeToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 10,
+    padding: 3,
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 6,
+  },
+  invModeBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    alignItems: 'center',
+    borderRadius: 8,
+  },
+  invModeBtnActive: { backgroundColor: colors.primary },
+  invModeBtnText: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  invModeBtnTextActive: { color: '#fff' },
+
+  loadMoreBtn: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  loadMoreText: { fontSize: 14, fontWeight: '600', color: colors.primary },
+
   filterBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -884,7 +1285,12 @@ const styles = StyleSheet.create({
   },
   jobCardTop: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4, gap: 8 },
   jobCardTopRight: { flexDirection: 'row', alignItems: 'center', flexShrink: 0 },
-  jobCardTitle: { flex: 1, fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  jobIdLabel: {
+    fontSize: 10, fontWeight: '600', color: colors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 2,
+  },
+  jobCardTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
   statusBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 0 },
   statusText: { fontSize: 11, fontWeight: '700' },
   jobCardCustomer: { fontSize: 13, color: colors.textSecondary, marginBottom: 3 },
@@ -892,19 +1298,21 @@ const styles = StyleSheet.create({
   invoiceSummaryRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
   invoiceSummaryText: { fontSize: 12, color: colors.textMuted },
   editIconBtn: {
-    position: 'absolute',
-    right: 14,
-    bottom: 14,
+    marginLeft: 6,
     backgroundColor: '#f0fdf4',
     borderRadius: 8,
     padding: 6,
+  },
+  editJobRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
   },
   editJobLink: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    alignSelf: 'flex-start',
-    marginBottom: 16,
     paddingVertical: 4,
     paddingHorizontal: 2,
   },
@@ -934,9 +1342,15 @@ const styles = StyleSheet.create({
   wizardContent: { padding: 16 },
 
   detailJobCard: { backgroundColor: colors.primary, borderRadius: 12, padding: 14, marginBottom: 20 },
+  detailJobId: {
+    fontSize: 10, fontWeight: '600', color: '#86efac',
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 3,
+  },
   detailJobName: { fontSize: 15, fontWeight: '700', color: '#fff' },
   detailJobCustomer: { fontSize: 13, color: '#bbf7d0', marginTop: 2 },
-  detailJobAddr: { fontSize: 12, color: '#86efac', marginTop: 2 },
+  detailJobAddrRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  detailJobAddr: { fontSize: 12, color: '#86efac' },
   detailJobEmail: { fontSize: 12, color: '#fff', marginTop: 2 },
 
   formSection: { marginBottom: 14 },
@@ -954,6 +1368,11 @@ const styles = StyleSheet.create({
 
   nextBtn: { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 8 },
   nextBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  saveReturnBtn: {
+    borderWidth: 1.5, borderColor: colors.primary, borderRadius: 12,
+    paddingVertical: 14, alignItems: 'center', marginTop: 8,
+  },
+  saveReturnBtnText: { color: colors.primary, fontSize: 15, fontWeight: '700' },
 
   lineItemsHint: { fontSize: 12, color: colors.textMuted, marginBottom: 12, marginLeft: 4 },
   lineItemCard: {
@@ -983,34 +1402,66 @@ const styles = StyleSheet.create({
   lineItemTotal: { fontSize: 14, fontWeight: '700', color: colors.textMuted, minWidth: 48, textAlign: 'right' },
   lineItemTotalActive: { color: colors.primary },
 
-  subtotalBar: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: '#f0fdf4', borderRadius: 10, paddingHorizontal: 16,
-    paddingVertical: 12, marginTop: 8, marginBottom: 16,
+  taxSummaryCard: {
+    backgroundColor: '#fff', borderRadius: 12, padding: 14, marginTop: 8, marginBottom: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06, shadowRadius: 3, elevation: 1,
   },
-  subtotalLabel: { fontSize: 14, fontWeight: '600', color: colors.primary },
-  subtotalValue: { fontSize: 16, fontWeight: '800', color: colors.primary },
+  taxRateRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  taxRateLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
+  taxRateInputWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  taxRateInput: {
+    backgroundColor: '#f9fafb', borderRadius: 8, borderWidth: 1, borderColor: '#e5e7eb',
+    paddingHorizontal: 10, paddingVertical: 6, fontSize: 15, fontWeight: '700',
+    color: colors.textPrimary, minWidth: 64, textAlign: 'center',
+  },
+  taxRatePct: { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  taxSummaryDivider: { height: 1, backgroundColor: '#e5e7eb', marginBottom: 10 },
+  taxSummaryLine: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 3 },
+  taxSummaryLineLabel: { fontSize: 13, color: colors.textSecondary },
+  taxSummaryLineValue: { fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  taxSummaryTotal: { marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#e5e7eb' },
+  taxSummaryTotalLabel: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  taxSummaryTotalValue: { fontSize: 17, fontWeight: '800', color: colors.primary },
 
   previewHeader: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
     backgroundColor: colors.primary, borderRadius: 12, padding: 16, marginBottom: 12,
   },
-  previewCompany: { fontSize: 16, fontWeight: '800', color: '#fff' },
+  previewCompany: { fontSize: 12, fontWeight: '800', color: '#fff' },
+  previewQualityText: { fontSize: 11, fontWeight: '700', color: '#fff', textAlign: 'right' },
   previewCompanySub: { fontSize: 12, color: '#bbf7d0', marginTop: 2 },
   previewInvoiceLabel: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
   previewInvoiceLabelText: { fontSize: 12, fontWeight: '800', color: '#fff', letterSpacing: 1 },
 
+  previewPaymentCard: { backgroundColor: '#f0fdf4', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: '#86efac' },
   previewMetaRow: { flexDirection: 'row', gap: 12, backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 10 },
-  previewMetaRight: { alignItems: 'flex-end', gap: 4 },
+  previewMetaRight: { alignItems: 'flex-end', gap: 4, minWidth: 150 },
   previewMetaHead: { fontSize: 10, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', marginBottom: 4, letterSpacing: 0.5 },
   previewMetaVal: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
   previewMetaSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
 
   previewRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
   previewRowLabel: { fontSize: 11, color: colors.textMuted, width: 52, textAlign: 'right' },
-  previewRowValue: { fontSize: 12, fontWeight: '600', color: colors.textPrimary },
+  previewRowValue: { fontSize: 12, fontWeight: '600', color: colors.textPrimary, flex: 1 },
 
   previewProjectCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 10 },
+  previewJobIdLabel: {
+    fontSize: 10, fontWeight: '600', color: colors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 3,
+  },
+
+  previewBottomRow: {
+    flexDirection: 'row',
+    gap: 12,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 16,
+  },
+  previewPaymentSide: { flex: 1 },
+  previewTotalsSide: { flex: 1 },
 
   previewTable: { backgroundColor: '#fff', borderRadius: 12, overflow: 'hidden', marginBottom: 10 },
   previewTableRow: {
@@ -1027,8 +1478,47 @@ const styles = StyleSheet.create({
   totalValue: { fontSize: 14, color: colors.textPrimary, fontWeight: '600' },
   totalLabelBold: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
   totalValueBold: { fontSize: 18, fontWeight: '800', color: colors.primary },
+  taxSubLabel: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
   totalsDivider: { height: 1, backgroundColor: '#e5e7eb', marginVertical: 8 },
 
+  lockBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: '#fef3c7', borderRadius: 8,
+    paddingHorizontal: 8, paddingVertical: 5,
+  },
+  lockBadgeText: { fontSize: 10, fontWeight: '700', color: '#d97706', letterSpacing: 0.2 },
+
+  lockedBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#fef3c7', borderRadius: 10, padding: 10,
+    marginBottom: 14, borderWidth: 1, borderColor: '#fde68a',
+  },
+  lockedBannerText: { fontSize: 12, fontWeight: '600', color: '#d97706', flex: 1 },
+  fixInvoiceBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: '#d97706', borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 6, flexShrink: 0,
+  },
+  fixInvoiceBtnText: { color: '#fff', fontSize: 12, fontWeight: '700' },
+
+  editLineItemsLink: { alignItems: 'center', marginTop: 10 },
+  editLineItemsLinkText: { fontSize: 13, color: colors.textMuted, fontWeight: '500', textDecorationLine: 'underline' },
+
+  lockedField: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: 14,
+  },
+  lockedFieldText: { fontSize: 15, color: colors.textSecondary },
+  totalDueBlock: { alignItems: 'flex-end', paddingTop: 2 },
+  totalDueLabel: { fontSize: 11, fontWeight: '600', color: colors.textMuted, marginTop: 3 },
+
+  photosBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 7, paddingVertical: 12, marginBottom: 10,
+    borderRadius: 12, borderWidth: 1.5, borderColor: '#2563eb',
+    backgroundColor: '#eff6ff',
+  },
+  photosBtnText: { fontSize: 15, fontWeight: '700', color: '#2563eb' },
   saveBtnRow: { flexDirection: 'row', gap: 10 },
   saveBtnOutline: {
     flex: 1, borderWidth: 2, borderColor: colors.primary, borderRadius: 12,
@@ -1045,6 +1535,105 @@ const styles = StyleSheet.create({
   },
   saveBtnDisabled: { opacity: 0.5, shadowOpacity: 0 },
   saveBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+
+  sendingProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 12,
+  },
+  sendingProgressText: { fontSize: 13, color: colors.textMuted },
+
+  toastWrap: {
+    position: 'absolute',
+    bottom: 48,
+    left: 20,
+    right: 20,
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  toastText: { color: '#fff', fontSize: 14, fontWeight: '600', flex: 1 },
+
+  sendConfirmBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  sendConfirmCard: {
+    width: '100%',
+    maxWidth: 380,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 22,
+    alignItems: 'stretch',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  sendConfirmIconWrap: {
+    alignSelf: 'center',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#f0fdf4',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  sendConfirmTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  sendConfirmSub: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 17,
+    marginBottom: 16,
+  },
+  sendConfirmRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+    gap: 12,
+  },
+  sendConfirmLabel: { fontSize: 12, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.4 },
+  sendConfirmValue: { fontSize: 14, color: colors.textPrimary, flexShrink: 1, textAlign: 'right' },
+  sendConfirmBtnRow: { flexDirection: 'row', gap: 10, marginTop: 18 },
+  sendConfirmBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 13,
+    borderRadius: 12,
+  },
+  sendConfirmBtnCancel:     { backgroundColor: '#f3f4f6' },
+  sendConfirmBtnCancelText: { fontSize: 14, fontWeight: '700', color: colors.textSecondary },
+  sendConfirmBtnSend:       { backgroundColor: colors.primary },
+  sendConfirmBtnSendText:   { fontSize: 14, fontWeight: '800', color: '#fff' },
 
   pickerContainer: { flex: 1, backgroundColor: '#f9fafb' },
   pickerHeader: {
@@ -1077,7 +1666,12 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 4,
   },
-  pickerJobTitle: { flex: 1, fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  pickerJobIdLabel: {
+    fontSize: 10, fontWeight: '600', color: colors.textMuted,
+    fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
+    letterSpacing: 0.5, marginBottom: 2,
+  },
+  pickerJobTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
   pickerJobCustomer: { fontSize: 13, color: colors.textSecondary, marginBottom: 4 },
   pickerJobDateRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   pickerJobDate: { fontSize: 12, color: colors.textMuted, fontWeight: '500' },
@@ -1085,4 +1679,5 @@ const styles = StyleSheet.create({
   pickerEmpty: { alignItems: 'center', paddingTop: 80, gap: 12 },
   pickerEmptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   pickerEmptySub: { fontSize: 13, color: colors.textSecondary, textAlign: 'center' },
+
 });
