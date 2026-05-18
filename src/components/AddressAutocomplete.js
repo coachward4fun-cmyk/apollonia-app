@@ -27,6 +27,7 @@ async function fetchSuggestions(input) {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': API_KEY,
+        'X-Ios-Bundle-Identifier': 'com.apolloniaconstruction.app',
       },
       body: JSON.stringify({
         input: input.trim(),
