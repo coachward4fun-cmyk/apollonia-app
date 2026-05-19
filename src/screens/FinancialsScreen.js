@@ -14,8 +14,8 @@ function localTodayStr() {
 }
 
 function fmtCurrency(n) {
-  if (!n && n !== 0) return '$0.00';
-  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (!n && n !== 0) return '$0';
+  return '$' + Math.round(Number(n)).toLocaleString('en-US');
 }
 
 function fmtPct(n) {
@@ -215,7 +215,7 @@ export default function FinancialsScreen() {
         <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           <View style={styles.tableCard}>
             <View style={[styles.row, styles.headRow]}>
-              <Text style={[styles.metricCell, styles.headLabel]}>Metric</Text>
+              <Text style={[styles.metricCell, styles.headLabel, styles.headLabelLeft]}>Metric</Text>
               <Text style={[styles.ytdCell, styles.headLabel]}>{year} YTD</Text>
               <Text style={[styles.prevCell, styles.headLabel]}>{prevYear}</Text>
             </View>
@@ -384,6 +384,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textAlign: 'right',
   },
+  headLabelLeft: { textAlign: 'left' },
   cellValue: { fontSize: 13, fontWeight: '600', color: colors.textPrimary, textAlign: 'right' },
   cellMuted: { fontSize: 13, color: colors.textMuted, textAlign: 'right' },
   positive:  { color: colors.primary },

@@ -11,8 +11,8 @@ import { colors } from '../theme/colors';
 const PAGE_SIZE = 25;
 
 function fmtCurrency(n) {
-  if (!n && n !== 0) return '$0.00';
-  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (!n && n !== 0) return '$0';
+  return '$' + Math.round(Number(n)).toLocaleString('en-US');
 }
 
 function currentYear() {

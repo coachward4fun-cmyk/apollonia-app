@@ -1191,8 +1191,8 @@ export default function JobFormScreen() {
       </Modal>
 
       {toast ? (
-        <View style={[styles.toast, toast.includes('SMS failed') && styles.toastError]} pointerEvents="none">
-          <Ionicons name={toast.includes('SMS failed') ? 'warning-outline' : 'checkmark-circle'} size={18} color="#fff" />
+        <View style={styles.toast} pointerEvents="none">
+          <Ionicons name="checkmark-circle" size={18} color="#fff" />
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}
@@ -1214,7 +1214,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2, shadowRadius: 6, elevation: 6,
   },
   toastText:  { color: '#fff', fontWeight: '700', fontSize: 15 },
-  toastError: { backgroundColor: 'rgba(220,38,38,0.95)' },
 
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',

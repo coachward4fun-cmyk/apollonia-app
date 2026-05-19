@@ -97,43 +97,39 @@ function getTomorrowChicago() {
 }
 
 function fmtDateLong(dateStr) {
-  // Renders YYYY-MM-DD as e.g. "Wed, Jun 5, 2026" without timezone drift.
+  // Renders YYYY-MM-DD as e.g. "June 5, 2026" without timezone drift.
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.toLocaleDateString('en-US', {
     timeZone: 'UTC',
-    weekday:  'short',
-    month:    'short',
+    month:    'long',
     day:      'numeric',
     year:     'numeric',
   });
 }
 
-function formatJobBlock(job, index, total) {
-  // Each job block within the SMS. Number jobs only when there's more than one.
-  const lines    = [];
-  const prefix   = total > 1 ? `${index + 1}. ` : '';
-  const jobName  = job.projectName || 'Untitled';
-  lines.push(`${prefix}${jobName}`);
-  if (job.jobType)        lines.push(`Type: ${job.jobType}`);
-  if (job.billToName)     lines.push(`Customer: ${job.billToName}`);
-  if (job.jobLocationAddress) {
-    lines.push(`Address: ${job.jobLocationAddress}`);
-    lines.push(`Map: http://maps.apple.com/?q=${encodeURIComponent(job.jobLocationAddress)}`);
-  }
-  if (job.estimatedDuration) lines.push(`Duration: ${job.estimatedDuration}`);
-  if (job.notes && String(job.notes).trim()) lines.push(`Notes: ${String(job.notes).trim()}`);
-  return lines.join('\n');
-}
-
-function buildDailySMS(leadName, jobs, dateStr) {
-  const header = [
+function buildJobSMS(job, crew, dateStr) {
+  const lines = [
     'Apollonia Construction',
-    `Tomorrow (${fmtDateLong(dateStr)}) — ${jobs.length} job${jobs.length === 1 ? '' : 's'}`,
+    'REMINDER: You have a job tomorrow',
+    `Job: ${job.projectName || 'Untitled'}`,
   ];
-  if (leadName) header.push(`Lead: ${leadName}`);
-  const blocks = jobs.map((j, i) => formatJobBlock(j, i, jobs.length));
-  return [header.join('\n'), ...blocks].join('\n\n');
+  if (job.jobType)            lines.push(`Job Type: ${job.jobType}`);
+  lines.push(`Date: ${fmtDateLong(dateStr)}`);
+  if (job.jobLocationAddress) {
+    lines.push(`Location: ${job.jobLocationAddress}`);
+    lines.push(`Map: https://maps.google.com/?q=${encodeURIComponent(job.jobLocationAddress)}`);
+  }
+  if (job.billToName)         lines.push(`Customer: ${job.billToName}`);
+  if (crew?.name)             lines.push(`Crew: ${crew.name}`);
+  const leadName   = crew?.lead?.name   || '';
+  const leadMobile = crew?.lead?.mobile || '';
+  if (leadName || leadMobile) {
+    lines.push(`Lead: ${[leadName, leadMobile].filter(Boolean).join(' ')}`);
+  }
+  lines.push('');
+  lines.push('Reply STOP to opt out');
+  return lines.join('\n');
 }
 
 exports.dayBeforeReminder = onSchedule(
@@ -169,41 +165,36 @@ exports.dayBeforeReminder = onSchedule(
     const crewMap   = {};
     crewsSnap.docs.forEach((d) => { crewMap[d.id] = d.data(); });
 
-    // Group eligible jobs by crewId. Skip jobs that are cancelled, archived,
-    // or unassigned, and skip crews without a lead mobile.
-    const jobsByCrew = {};
+    // One SMS per eligible job. Skip jobs that are cancelled, archived, or
+    // unassigned, and skip crews without a lead mobile.
+    const eligibleJobs = [];
     for (const jobDoc of jobsSnap.docs) {
       const job = jobDoc.data();
       if (!job.crewId)                              continue;
       if (job.archivedForCustomer)                  continue;
       if ((job.status || '').toLowerCase() === 'cancelled') continue;
       if (!crewMap[job.crewId]?.lead?.mobile)       continue;
-      (jobsByCrew[job.crewId] = jobsByCrew[job.crewId] || []).push(job);
+      eligibleJobs.push(job);
     }
 
-    let leadsNotified = 0;
-    let smsSent       = 0;
-    const totalCrews  = Object.keys(jobsByCrew).length;
+    let smsSent = 0;
+    const totalJobs = eligibleJobs.length;
 
-    for (const crewId of Object.keys(jobsByCrew)) {
-      const crew = crewMap[crewId];
-      const jobs = jobsByCrew[crewId].sort((a, b) =>
-        (a.projectName || '').localeCompare(b.projectName || ''),
-      );
-      const body = buildDailySMS(crew.lead?.name, jobs, tomorrowStr);
+    for (const job of eligibleJobs) {
+      const crew = crewMap[job.crewId];
+      const body = buildJobSMS(job, crew, tomorrowStr);
 
       try {
         await twilio.messages.create({ from: fromNumber, to: crew.lead.mobile, body });
         await db.collection('activityLog').add({
           action:    'day_before_reminder_sent',
-          detail:    `Day-before reminder sent to ${crew.name || 'crew'} (${jobs.length} job${jobs.length === 1 ? '' : 's'})`,
+          detail:    `Day-before reminder sent to ${crew.name || 'crew'} for ${job.projectName || 'job'}`,
           timestamp: admin.firestore.Timestamp.now(),
         });
-        leadsNotified++;
         smsSent++;
-        console.log('[dayBeforeReminder] Sent to', crew.lead.mobile, '—', jobs.length, 'job(s)');
+        console.log('[dayBeforeReminder] Sent to', crew.lead.mobile, '—', job.projectName);
       } catch (err) {
-        console.error('[dayBeforeReminder] Failed for', crew.name || crewId, ':', err.message);
+        console.error('[dayBeforeReminder] Failed for', crew.name || job.crewId, ':', err.message);
         await db.collection('activityLog').add({
           action:    'day_before_reminder_failed',
           detail:    `SMS failed for ${crew.name || 'crew'}: ${err.message}`,
@@ -212,6 +203,6 @@ exports.dayBeforeReminder = onSchedule(
       }
     }
 
-    console.log(`[dayBeforeReminder] Done — ${smsSent}/${totalCrews} SMS sent for ${tomorrowStr}; ${leadsNotified} lead(s) notified.`);
+    console.log(`[dayBeforeReminder] Done — ${smsSent}/${totalJobs} SMS sent for ${tomorrowStr}.`);
   },
 );

@@ -61,6 +61,11 @@ function fmt$(n) {
   });
 }
 
+function fmt$Round(n) {
+  if (!n && n !== 0) return '$0';
+  return '$' + Math.round(Number(n)).toLocaleString('en-US');
+}
+
 function formatDate(str) {
   if (!str) return '—';
   const d = new Date(str + 'T00:00:00');
@@ -227,21 +232,21 @@ export default function ExpensesScreen() {
         <View style={styles.summaryRow}>
           <SummaryCard
             label="Total"
-            amount={fmt$(totalAll)}
+            amount={fmt$Round(totalAll)}
             active={filter === null}
             onPress={() => setFilter(null)}
             iconColor={colors.primary}
           />
           <SummaryCard
             label="Job"
-            amount={fmt$(totalJob)}
+            amount={fmt$Round(totalJob)}
             active={filter === 'job'}
             onPress={() => handleCardTap('job')}
             iconColor="#2563eb"
           />
           <SummaryCard
             label="Company"
-            amount={fmt$(totalCompany)}
+            amount={fmt$Round(totalCompany)}
             active={filter === 'company'}
             onPress={() => handleCardTap('company')}
             iconColor="#d97706"

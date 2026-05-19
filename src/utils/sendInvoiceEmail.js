@@ -129,10 +129,10 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
     const lt = (Number(item.qty) || 0) * (Number(item.unitPrice) || 0);
     return `
       <tr>
-        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;color:#111827;">${item.description}</td>
-        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;text-align:center;color:#374151;">${item.qty}</td>
-        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;text-align:right;color:#374151;">${fmtDecimal(item.unitPrice)}</td>
-        <td style="padding:10px 12px;border-bottom:1px solid #f3f4f6;font-size:13px;text-align:right;font-weight:600;color:#111827;">${fmtDecimal(lt)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;color:#111827;">${item.description}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:center;color:#374151;">${item.qty}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;color:#374151;">${fmtDecimal(item.unitPrice)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;font-weight:600;color:#111827;">${fmtDecimal(lt)}</td>
       </tr>`;
   }).join('');
 
@@ -153,33 +153,34 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   <div style="max-width:680px;margin:0 auto;background:#fff;">
 
     <!-- Header (green bar) — logo flush left, tagline centered in the space to its right -->
-    <div style="background:#16a34a;padding:0;">
-      <table style="width:100%;border-collapse:collapse;"><tr>
-        <td style="vertical-align:middle;text-align:left;width:1px;white-space:nowrap;padding:0;">
+    <div style="background:#16a34a;padding:0;height:50px;">
+      <table style="width:100%;height:50px;border-collapse:collapse;"><tr>
+        <td style="vertical-align:middle;text-align:left;width:1px;white-space:nowrap;padding:0 8px 0 0;">
           ${logoSrc
-            ? `<img src="${logoSrc}" style="height:80px;max-width:260px;display:block;" alt="${companyName}" />`
-            : `<div style="padding:24px 24px;"><div style="font-size:18px;font-weight:800;color:#fff;">${companyName}</div>${companyAddr ? `<div style="font-size:12px;color:#bbf7d0;margin-top:2px;">${companyAddr}</div>` : ''}</div>`
+            ? `<img src="${logoSrc}" style="height:50px;max-width:200px;display:block;" alt="${companyName}" />`
+            : `<div style="padding:0 24px;"><div style="font-size:18px;font-weight:800;color:#fff;">${companyName}</div>${companyAddr ? `<div style="font-size:12px;color:#bbf7d0;margin-top:2px;">${companyAddr}</div>` : ''}</div>`
           }
         </td>
         <td style="vertical-align:middle;text-align:center;padding:0 24px;">
           ${tagline
-            ? `<div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:0.3px;line-height:1.2;">&ldquo;${tagline}&rdquo;</div>`
+            ? `<div style="font-size:22px;font-weight:800;font-style:italic;color:#fff;letter-spacing:0.3px;line-height:1.2;">&ldquo;${tagline}&rdquo;</div>`
             : ''}
         </td>
       </tr></table>
     </div>
 
     <!-- Body -->
-    <div style="padding:14px 32px 24px 32px;">
+    <div style="padding:8px 32px;">
 
       <!-- Bill-to + Invoice meta -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:14px;">
+      <table style="width:100%;border-collapse:collapse;margin-bottom:0;">
         <tr>
           <td style="vertical-align:top;width:55%;">
-            <div style="font-size:10px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;">Bill To</div>
+            <div style="font-size:9pt;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;">Bill To</div>
             <div style="font-size:15px;font-weight:700;color:#111827;">${job.billToName || ''}</div>
-            ${job.billToAddress ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${job.billToAddress}</div>` : ''}
-            ${job.email ? `<div style="font-size:13px;color:#6b7280;margin-top:2px;">${job.email}</div>` : ''}
+            ${(job.billToAddress || job.email)
+              ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${[job.billToAddress, job.email].filter(Boolean).join('&nbsp;&nbsp;')}</div>`
+              : ''}
           </td>
           <td style="vertical-align:top;text-align:right;">
             <table style="margin-left:auto;border-collapse:collapse;">
@@ -201,8 +202,8 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
       </table>
 
       <!-- Project -->
-      <div style="background:#f0fdf4;border-radius:8px;padding:14px 16px;margin-bottom:24px;border-left:4px solid #16a34a;">
-        <div style="font-size:10px;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">Project</div>
+      <div style="background:#f0fdf4;border-radius:8px;padding:8px 16px;margin-bottom:8px;border-left:4px solid #16a34a;">
+        <div style="font-size:9pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">Project</div>
         <div style="font-size:14px;color:#111827;line-height:1.4;">
           ${job.jobId ? `<span style="font-weight:600;color:#6b7280;font-family:monospace;margin-right:8px;">Job ${escapeHtml(job.jobId)}</span>` : ''}
           <span style="font-weight:700;">${job.projectName || ''}</span>
@@ -212,29 +213,29 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
       </div>
 
       <!-- Line items -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+      <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
         <thead>
           <tr style="background:#f9fafb;">
-            <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">Description</th>
-            <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:50px;">Qty</th>
-            <th style="padding:10px 12px;text-align:right;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Unit Price</th>
-            <th style="padding:10px 12px;text-align:right;font-size:11px;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Total</th>
+            <th style="padding:8px 12px;text-align:left;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">Description</th>
+            <th style="padding:8px 12px;text-align:center;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:50px;">Qty</th>
+            <th style="padding:8px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Unit Price</th>
+            <th style="padding:8px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Total</th>
           </tr>
         </thead>
         <tbody>${itemRows}</tbody>
       </table>
 
       <!-- Bottom: Send Payment To (left) + Totals (right) -->
-      <table style="width:100%;border-collapse:collapse;margin-top:24px;border-top:2px solid #e5e7eb;">
+      <table style="width:100%;border-collapse:collapse;margin-top:8px;border-top:2px solid #e5e7eb;">
         <tr>
-          <td style="vertical-align:top;width:50%;padding-right:24px;padding-top:18px;">
-            <div style="font-size:10px;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;">Send Payment To</div>
+          <td style="vertical-align:top;width:50%;padding-right:24px;padding-top:8px;">
+            <div style="font-size:9pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:8px;">Send Payment To</div>
             <div style="font-size:14px;font-weight:700;color:#111827;">${companyName}</div>
             ${companyAddr  ? `<div style="font-size:13px;color:#6b7280;margin-top:3px;">${companyAddr}</div>`  : ''}
             ${billingEmail ? `<div style="font-size:13px;color:#6b7280;margin-top:2px;">${billingEmail}</div>` : ''}
             ${companyPhone ? `<div style="font-size:13px;color:#6b7280;margin-top:2px;">${companyPhone}</div>` : ''}
           </td>
-          <td style="vertical-align:top;padding-top:18px;">
+          <td style="vertical-align:top;padding-top:8px;">
             <table style="width:100%;border-collapse:collapse;">
               <tr>
                 <td style="padding:5px 0;font-size:13px;color:#6b7280;">Subtotal</td>

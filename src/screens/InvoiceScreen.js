@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import DatePickerField from '../components/DatePickerField';
 import { sendInvoiceEmail } from '../utils/sendInvoiceEmail';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { saveJob, getExpenses, getJobTypes, subscribeCompanyProfile, getNextInvoiceNumber } from '../services/db';
 import { useAppData } from '../context/AppDataContext';
@@ -73,6 +73,29 @@ export default function InvoiceScreen() {
   }, [route.params?.preselectedJobId, jobs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { setInvPage(1); }, [invMode, statusFilter]);
+
+  // Reset any blocking state when the screen regains focus (e.g., returning
+  // from Edit Job after saving line items). Without this, leftover modal /
+  // loading state from the InvoiceWizard could leave the screen unscrollable.
+  useFocusEffect(
+    useCallback(() => {
+      console.log('[InvoiceScreen] focus — state:', {
+        refreshing,
+        showWizard,
+        showJobPicker,
+        selectedJobId,
+        statusFilter,
+        invMode,
+        invPage,
+        preselectedJobId: route.params?.preselectedJobId ?? null,
+      });
+      setRefreshing(false);
+      setShowJobPicker(false);
+      // Do NOT reset showWizard / selectedJobId here — the preselectedJobId
+      // effect below intentionally reopens the wizard when returning from
+      // Edit Job, and we don't want to fight that.
+    }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -380,6 +403,18 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
     if (!visible || !preselectedJob) return;
 
     const init = async () => {
+      // Clear any blocking state left over from a prior wizard session. The
+      // parent can flip `visible` to false without calling handleClose (e.g.,
+      // when the user taps "Edit Job"), so reset() is bypassed and stale
+      // confirm modals / spinners / toasts would otherwise persist and lock
+      // the UI when the wizard reopens.
+      setSaving(false);
+      setSending(false);
+      setShowSendConfirm(false);
+      setSendProgress({ done: 0, total: 0 });
+      setToast('');
+      setFixedInvoice(false);
+
       setSelJob(preselectedJob);
       setStep(2);
 
@@ -960,8 +995,11 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
                   <View style={{ flex: 1 }}>
                     <Text style={styles.previewMetaHead}>Bill To</Text>
                     <Text style={styles.previewMetaVal}>{selJob.billToName}</Text>
-                    {selJob.billToAddress ? <Text style={styles.previewMetaSub}>{selJob.billToAddress}</Text> : null}
-                    {selJob.email ? <Text style={styles.previewMetaSub}>{selJob.email}</Text> : null}
+                    {(selJob.billToAddress || selJob.email) ? (
+                      <Text style={styles.previewMetaSub}>
+                        {[selJob.billToAddress, selJob.email].filter(Boolean).join('  ')}
+                      </Text>
+                    ) : null}
                   </View>
                   <View style={styles.previewMetaRight}>
                     <PreviewRow label="Invoice #" value={invNumber} />
@@ -985,10 +1023,10 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
 
                 <View style={styles.previewTable}>
                   <View style={[styles.previewTableRow, styles.previewTableHead]}>
-                    <Text style={[styles.previewTableCell, { flex: 1 }]}>Description</Text>
-                    <Text style={[styles.previewTableCell, { flex: 0, width: 50, textAlign: 'center' }]}>Qty</Text>
-                    <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Price</Text>
-                    <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Total</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 1 }]}>Description</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 0, width: 50, textAlign: 'center' }]}>Qty</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Unit Price</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Total</Text>
                   </View>
                   {lineItems
                     .filter((item) => (parseFloat(item.qty) || 0) > 0)
@@ -1425,8 +1463,10 @@ const styles = StyleSheet.create({
   taxSummaryTotalValue: { fontSize: 17, fontWeight: '800', color: colors.primary },
 
   previewHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
-    backgroundColor: colors.primary, borderRadius: 12, padding: 16, marginBottom: 12,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: colors.primary, borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 2, marginBottom: 8,
+    minHeight: 50,
   },
   previewCompany: { fontSize: 12, fontWeight: '800', color: '#fff' },
   previewQualityText: { fontSize: 11, fontWeight: '700', color: '#fff', textAlign: 'right' },
@@ -1435,9 +1475,12 @@ const styles = StyleSheet.create({
   previewInvoiceLabelText: { fontSize: 12, fontWeight: '800', color: '#fff', letterSpacing: 1 },
 
   previewPaymentCard: { backgroundColor: '#f0fdf4', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: '#86efac' },
-  previewMetaRow: { flexDirection: 'row', gap: 12, backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 10 },
+  previewMetaRow: {
+    flexDirection: 'row', gap: 12, backgroundColor: '#fff', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 8, marginBottom: 0,
+  },
   previewMetaRight: { alignItems: 'flex-end', gap: 4, minWidth: 150 },
-  previewMetaHead: { fontSize: 10, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', marginBottom: 4, letterSpacing: 0.5 },
+  previewMetaHead: { fontSize: 9, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', marginBottom: 4, letterSpacing: 0.5 },
   previewMetaVal: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
   previewMetaSub: { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
 
@@ -1445,7 +1488,10 @@ const styles = StyleSheet.create({
   previewRowLabel: { fontSize: 11, color: colors.textMuted, width: 52, textAlign: 'right' },
   previewRowValue: { fontSize: 12, fontWeight: '600', color: colors.textPrimary, flex: 1 },
 
-  previewProjectCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 10 },
+  previewProjectCard: {
+    backgroundColor: '#fff', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 8, marginBottom: 8,
+  },
   previewJobIdLabel: {
     fontSize: 10, fontWeight: '600', color: colors.textMuted,
     fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace',
@@ -1457,19 +1503,21 @@ const styles = StyleSheet.create({
     gap: 12,
     backgroundColor: '#fff',
     borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginBottom: 8,
   },
   previewPaymentSide: { flex: 1 },
   previewTotalsSide: { flex: 1 },
 
-  previewTable: { backgroundColor: '#fff', borderRadius: 12, overflow: 'hidden', marginBottom: 10 },
+  previewTable: { backgroundColor: '#fff', borderRadius: 12, overflow: 'hidden', marginBottom: 8 },
   previewTableRow: {
-    flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10,
+    flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 8,
     borderBottomWidth: 1, borderBottomColor: '#f3f4f6',
   },
   previewTableHead: { backgroundColor: '#f9fafb' },
-  previewTableCell: { flex: 1, fontSize: 11, color: colors.textPrimary },
+  previewTableCell: { flex: 1, fontSize: 10, color: colors.textPrimary },
+  previewTableHeadCell: { fontSize: 9, fontWeight: '700', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
   previewTableRight: { textAlign: 'right', fontWeight: '600' },
 
   totalsCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 16 },
