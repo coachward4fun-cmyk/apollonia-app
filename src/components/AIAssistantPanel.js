@@ -14,7 +14,7 @@ import { isOnAdminTab, navigationRef } from '../utils/navigationRef';
 import { saveCustomer } from '../services/db';
 import {
   parseSmartJobIntent, resolveDayHint, matchCustomers, matchJobType,
-  pickMostRecent, formatDateLabel,
+  formatDateLabel, suggestCustomers,
 } from '../utils/smartJobIntent';
 
 const GREEN = '#16a34a';
@@ -450,36 +450,66 @@ export default function AIAssistantPanel() {
       const targetDate  = resolveDayHint(dayHint);
       const matchedType = matchJobType(typeHint, jobTypes);
 
-      let matched   = null;
-      let multiple  = false;
+      let matched         = null;
+      let ambiguousMatches = null; // populated when multiple confident matches exist
       if (customerHint) {
         const matches = matchCustomers(customerHint, customers);
         if (matches.length === 1) {
           matched = matches[0];
         } else if (matches.length > 1) {
-          matched  = pickMostRecent(matches);
-          multiple = true;
+          // Multiple confident matches → let the user choose; never silently pick.
+          ambiguousMatches = matches;
         }
       }
 
-      // No customer match → show picker chips, leave panel open
+      // Show picker for either no confident match OR multiple confident matches.
       if (customerHint && !matched) {
-        const active = customers
-          .filter((c) => !c.archived && c.name)
-          .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
-          .slice(0, 12);
-        const msg = active.length
-          ? `I couldn't find a customer matching "${customerHint}". Tap one to use it, or close and add a new customer first.`
-          : `I couldn't find a customer matching "${customerHint}", and there are no customers yet. Close this and add a customer first.`;
+        // Pick the candidate list to show in the picker:
+        //   - ambiguous case: the equally-confident matches themselves
+        //   - no-match case: top suggestions; fall back to most-recent list if none.
+        let candidates;
+        let suggestions = [];
+        if (ambiguousMatches) {
+          candidates = ambiguousMatches.slice(0, 3);
+        } else {
+          suggestions = suggestCustomers(customerHint, customers, 3);
+          if (suggestions.length) {
+            candidates = suggestions;
+          } else {
+            candidates = customers
+              .filter((c) => !c.archived && c.name)
+              .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+              .slice(0, 12);
+          }
+        }
+
+        // Spoken cap: 2 names max — long lists get fatiguing.
+        const spokenNames = candidates.slice(0, 2).map((c) => c.name);
+        const writtenNames = candidates.slice(0, 3).map((c) => `"${c.name}"`);
+        let msg;
+        let spoken;
+        if (ambiguousMatches) {
+          msg    = `Multiple customers match "${customerHint}". Did you mean ${writtenNames.join(' or ')}? Tap one to use, or close and add a new customer.`;
+          spoken = `Multiple customers match ${customerHint}. Did you mean ${spokenNames.join(' or ')}?`;
+        } else if (suggestions.length) {
+          msg    = `I didn't find a customer matching "${customerHint}". Did you mean ${writtenNames.join(' or ')}? Tap one to use, or close and add a new customer.`;
+          spoken = `I didn't find a customer matching ${customerHint}. Did you mean ${spokenNames.join(' or ')}?`;
+        } else if (candidates.length) {
+          msg    = `I couldn't find a customer matching "${customerHint}". Tap one from the list, or close and add a new customer first.`;
+          spoken = `I couldn't find a customer matching ${customerHint}. Please pick one from the list.`;
+        } else {
+          msg    = `I couldn't find a customer matching "${customerHint}", and there are no customers yet. Close this and add a customer first.`;
+          spoken = `I couldn't find a customer matching ${customerHint}. There are no customers yet.`;
+        }
         addMessage({ role: 'assistant', content: msg });
-        speakText(`I couldn't find a customer matching ${customerHint}. Please pick one from the list.`);
-        setCustomerPicker({ customers: active, targetDate: targetDate || '', jobType: matchedType || '' });
+        speakText(spoken);
+        setCustomerPicker({ customers: candidates, targetDate: targetDate || '', jobType: matchedType || '' });
         return;
       }
 
       const parts = [];
       if (matchedType) parts.push(`Type: ${matchedType}`);
-      if (matched)     parts.push(`Customer: ${matched.name}${multiple ? ' (most recent match)' : ''}`);
+      if (matched)     parts.push(`Customer: ${matched.name}`);
       if (targetDate)  parts.push(`Date: ${formatDateLabel(targetDate)}`);
       let summary = parts.length
         ? `Opening new job — ${parts.join(', ')}. Finish the rest of the form when ready.`

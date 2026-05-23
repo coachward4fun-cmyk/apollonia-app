@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../config/firebase';
 import {
   subscribeJobs, subscribeCrews, subscribeCustomers,
   getJobTypes, getEmailConfig, saveCrew,
@@ -39,34 +41,64 @@ export function AppDataProvider({ children }) {
   const phoneNormalizationDone = useRef(false);
 
   // ── Real-time subscriptions: jobs and crews live for the entire app session ──
+  //
+  // Auth-gated: anonymous sign-in is bootstrapped from RootContent and may not
+  // be complete when this provider mounts. Firing onSnapshot before auth
+  // resolves used to fail silently (permission-denied → callback with []) and
+  // never retry. We now subscribe to auth state, attach Firestore listeners
+  // once a user (anonymous or otherwise) exists, and re-attach if the uid
+  // changes (e.g., sign-out → sign-in).
   useEffect(() => {
-    const unsubJobs = subscribeJobs((list) => {
-      setJobs(list);
-      setJobsLoading(false);
-      setLastSync(new Date());
-    });
-    const unsubCrews = subscribeCrews((list) => {
-      setCrews(list);
-      setCrewsLoading(false);
+    let unsubFirestore = () => {};
+    let currentUid    = null;
 
-      if (!phoneNormalizationDone.current && list.length > 0) {
-        phoneNormalizationDone.current = true;
-        for (const crew of list) {
-          const raw = crew.lead?.mobile;
-          if (!raw) continue;
-          const fixed = normalizePhone(raw);
-          if (fixed && fixed !== raw) {
-            console.log('[AppData] normalizing crew phone:', crew.name, raw, '→', fixed);
-            saveCrew({ ...crew, lead: { ...crew.lead, mobile: fixed } }).catch(() => {});
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      const nextUid = user?.uid || null;
+      if (nextUid === currentUid) return; // no-op on identical re-fires
+      currentUid = nextUid;
+
+      // Tear down any prior listeners before attaching new ones.
+      unsubFirestore();
+      unsubFirestore = () => {};
+
+      if (!user) {
+        // Signed out — keep the in-memory cache around so the UI doesn't blank
+        // during the brief gap before anonymous sign-in re-fires; loading
+        // flags also stay as-is.
+        return;
+      }
+
+      const unsubJobs = subscribeJobs((list) => {
+        setJobs(list);
+        setJobsLoading(false);
+        setLastSync(new Date());
+      });
+      const unsubCrews = subscribeCrews((list) => {
+        setCrews(list);
+        setCrewsLoading(false);
+
+        if (!phoneNormalizationDone.current && list.length > 0) {
+          phoneNormalizationDone.current = true;
+          for (const crew of list) {
+            const raw = crew.lead?.mobile;
+            if (!raw) continue;
+            const fixed = normalizePhone(raw);
+            if (fixed && fixed !== raw) {
+              console.log('[AppData] normalizing crew phone:', crew.name, raw, '→', fixed);
+              saveCrew({ ...crew, lead: { ...crew.lead, mobile: fixed } }).catch(() => {});
+            }
           }
         }
-      }
+      });
+      const unsubCustomers = subscribeCustomers((list) => {
+        setCustomers(list);
+        setCustomersLoading(false);
+      });
+
+      unsubFirestore = () => { unsubJobs(); unsubCrews(); unsubCustomers(); };
     });
-    const unsubCustomers = subscribeCustomers((list) => {
-      setCustomers(list);
-      setCustomersLoading(false);
-    });
-    return () => { unsubJobs(); unsubCrews(); unsubCustomers(); };
+
+    return () => { unsubAuth(); unsubFirestore(); };
   }, []);
 
   // Derived: active jobs (= jobs not archived because their customer was archived).

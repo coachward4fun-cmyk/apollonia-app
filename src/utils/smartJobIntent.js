@@ -92,33 +92,57 @@ export function resolveDayHint(hint, today = new Date()) {
   return fmt(d);
 }
 
+// Returns CONFIDENT matches only — caller must present the picker (with
+// suggestCustomers) when this returns nothing or more than one.
 export function matchCustomers(query, customers) {
   if (!query) return [];
   const q = query.toLowerCase().trim();
   const active = customers.filter((c) => !c.archived && c.name);
 
-  const exact      = active.filter((c) => c.name.toLowerCase() === q);
+  // Tier 1: exact (case-insensitive)
+  const exact = active.filter((c) => c.name.toLowerCase() === q);
   if (exact.length) return exact;
+
+  // Tier 2: customer name starts with the full query
   const startsWith = active.filter((c) => c.name.toLowerCase().startsWith(q));
   if (startsWith.length) return startsWith;
-  const contains   = active.filter((c) => c.name.toLowerCase().includes(q));
-  if (contains.length) return contains;
 
-  // Token-overlap fallback for partial matches like "shamrock" → "Shamrock Roofing Nebraska"
-  const qTokens = q.split(/\s+/).filter((t) => t.length >= 3);
+  // Tier 3: every query token appears as a standalone name token (or a prefix
+  // of one). Strict by design — the loose bidirectional substring match this
+  // replaced was wrongly equating "Shamrock Construction" with anything that
+  // had "construction" in the name.
+  const qTokens = q.split(/\s+/).filter(Boolean);
+  if (qTokens.length === 0) return [];
+  const allTokensPresent = active.filter((c) => {
+    const nameTokens = c.name.toLowerCase().split(/\s+/);
+    return qTokens.every((t) =>
+      nameTokens.some((nt) => nt === t || nt.startsWith(t))
+    );
+  });
+  return allTokensPresent;
+}
+
+// Return the top N closest customer names by single-token-overlap score.
+// Used ONLY for "did you mean?" suggestions when matchCustomers finds nothing
+// confident — never as an automatic pick.
+export function suggestCustomers(query, customers, limit = 3) {
+  if (!query) return [];
+  const q = query.toLowerCase().trim();
+  const qTokens = q.split(/\s+/).filter(Boolean);
   if (!qTokens.length) return [];
-  const scored = active
-    .map((c) => {
-      const nameTokens = c.name.toLowerCase().split(/\s+/);
-      let score = 0;
-      for (const t of qTokens) {
-        if (nameTokens.some((nt) => nt.includes(t) || t.includes(nt))) score++;
-      }
-      return { customer: c, score };
-    })
-    .filter((x) => x.score > 0)
+
+  const active = customers.filter((c) => !c.archived && c.name);
+  const scored = active.map((c) => {
+    const nameTokens = c.name.toLowerCase().split(/\s+/);
+    let score = 0;
+    for (const t of qTokens) {
+      if (nameTokens.some((nt) => nt === t || nt.startsWith(t) || t.startsWith(nt))) score++;
+    }
+    return { customer: c, score };
+  }).filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score);
-  return scored.map((x) => x.customer);
+
+  return scored.slice(0, limit).map((x) => x.customer);
 }
 
 export function pickMostRecent(customers) {
