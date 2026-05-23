@@ -22,6 +22,12 @@ export function AIAssistantProvider({ children }) {
   const [voiceEnabled,   setVoiceEnabled]   = useState(true);
   const voiceEnabledRef  = useRef(true);
 
+  // Voice session = the user entered via the floating-mic tap, which forces TTS
+  // on for the duration of the session regardless of the persisted voiceEnabled
+  // toggle. Ends on closePanel.
+  const [voiceSessionActive, setVoiceSessionActive] = useState(false);
+  const voiceSessionRef = useRef(false);
+
   // Load persisted voice preference once on mount
   useEffect(() => {
     AsyncStorage.getItem(VOICE_KEY).then((val) => {
@@ -69,12 +75,26 @@ export function AIAssistantProvider({ children }) {
     _listenControls.current.stop?.();
     _autoListenCb.current = null;
     setListenStatus('idle');
+    setVoiceSessionActive(false);
+    voiceSessionRef.current = false;
+  }, []);
+
+  const startVoiceSession = useCallback(() => {
+    setVoiceSessionActive(true);
+    voiceSessionRef.current = true;
+  }, []);
+
+  const endVoiceSession = useCallback(() => {
+    setVoiceSessionActive(false);
+    voiceSessionRef.current = false;
   }, []);
 
   // ── TTS — accepts optional onDone callback ────────────────────────────────────
 
   const speakText = useCallback((text, { onDone } = {}) => {
-    if (!voiceEnabledRef.current) {
+    // Voice-session override: when the user entered via the mic tap, TTS is on
+    // for the whole session regardless of the persisted voiceEnabled toggle.
+    if (!voiceEnabledRef.current && !voiceSessionRef.current) {
       // Voice off — skip TTS but fire onDone so speakAndListen can still open the mic.
       onDone?.();
       return;
@@ -171,6 +191,7 @@ export function AIAssistantProvider({ children }) {
       isProcessing, setIsProcessing,
       isSpeaking, speakText, stopSpeaking,
       voiceEnabled, toggleVoice,
+      voiceSessionActive, startVoiceSession, endVoiceSession,
       conversation, addMessage, clearConversation,
       pendingAction, setPendingAction,
       pendingVoiceText, submitVoiceText, clearPendingVoiceText,

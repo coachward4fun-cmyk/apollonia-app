@@ -242,7 +242,7 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
                 <td style="padding:5px 0;font-size:13px;color:#111827;text-align:right;">${fmtDecimal(subtotal)}</td>
               </tr>
               <tr>
-                <td style="padding:5px 0;font-size:13px;color:#6b7280;">Tax (${taxDisplay})</td>
+                <td style="padding:5px 0;font-size:13px;color:#6b7280;">Tax (${taxDisplay})${taxRateNum === 0 ? ' *' : ''}</td>
                 <td style="padding:5px 0;font-size:13px;color:#111827;text-align:right;">${fmtDecimal(tax)}</td>
               </tr>
               <tr>
@@ -256,6 +256,7 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
           </td>
         </tr>
       </table>
+      ${taxRateNum === 0 ? `<div style="margin-top:14px;font-style:italic;font-size:9pt;color:#6b7280;">* This invoice reflects non-retail services in support of Real Property improvement</div>` : ''}
       ${footerNote ? `<div style="margin-top:16px;">${footerNote}</div>` : ''}
 
     </div>
@@ -477,7 +478,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-    logActivity('invoice_emailed', `Invoice #${invoiceNumber} - Gmail SMTP - To: ${toEmail}`);
+    logActivity('invoice_emailed', `Invoice #${invoiceNumber} — ${job.projectName || 'job'}${job.billToName ? ` (${job.billToName})` : ''} - Gmail SMTP - To: ${toEmail}`);
     return { ok: true };
   } catch (err) {
     const message = err?.message || 'Email send failed';

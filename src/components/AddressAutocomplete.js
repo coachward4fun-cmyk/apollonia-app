@@ -32,6 +32,7 @@ async function fetchSuggestions(input) {
       body: JSON.stringify({
         input: input.trim(),
         includedPrimaryTypes: ['geocode'],
+        includedRegionCodes: ['us'],
         locationBias: {
           circle: {
             center: { latitude: 41.2565, longitude: -95.9345 }, // Omaha, NE

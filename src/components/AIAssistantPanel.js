@@ -51,6 +51,7 @@ export default function AIAssistantPanel() {
     listenStatus,
     startAutoListen, stopAutoListen,
     registerInterimCallback,
+    voiceSessionActive,
   } = useAIAssistant();
 
   const { user }  = useAuth();
@@ -72,7 +73,17 @@ export default function AIAssistantPanel() {
   const voiceFlowRef        = useRef(voiceFlow);
   const handleSendRef       = useRef(null);
   const handlePauseFlowRef  = useRef(null);
+  const handleConfirmRef    = useRef(null);
+  const handleCancelRef     = useRef(null);
   const lastTextRef         = useRef('');
+  // True while we're listening for a yes/no answer to a Claude-proposed
+  // pendingAction during a voice session. handleSend short-circuits to
+  // handleConfirm / handleCancel when this is set.
+  const awaitingPendingConfirmationRef = useRef(false);
+  // Holds the in-progress smart-create prefill while we wait for the user's
+  // "anything else to add?" answer. handleSend intercepts the next message
+  // when this ref is non-null, parses extra fields, then navigates.
+  const smartCreateFollowupRef = useRef(null);
 
   // Keep voiceFlowRef current so async callbacks see latest state
   useEffect(() => { voiceFlowRef.current = voiceFlow; }, [voiceFlow]);
@@ -107,6 +118,8 @@ export default function AIAssistantPanel() {
       setCustomerPicker(null);
       setTextInput('');
       lastTextRef.current = '';
+      awaitingPendingConfirmationRef.current = false;
+      smartCreateFollowupRef.current = null;
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -392,6 +405,30 @@ export default function AIAssistantPanel() {
 
   // ── Smart job-create: parse hint, match customer, open form ──────────────────
 
+  const navigateToJobFormWithPrefill = useCallback((prefill) => {
+    setCustomerPicker(null);
+    smartCreateFollowupRef.current = null;
+    setTimeout(() => {
+      closePanel();
+      InteractionManager.runAfterInteractions(() => {
+        navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
+      });
+    }, 600);
+  }, [closePanel]);
+
+  // Speak the "anything else?" follow-up and stash the prefill so handleSend
+  // picks the next utterance up as an extension of this smart-create.
+  const askForExtraDetailsAndNavigate = useCallback((prefill) => {
+    smartCreateFollowupRef.current = { prefill };
+    const parts = [];
+    parts.push(prefill.jobType ? `a ${prefill.jobType} job` : 'a new job');
+    if (prefill.billToName) parts.push(`for ${prefill.billToName}`);
+    if (prefill.targetDate) parts.push(`on ${formatDateLabel(prefill.targetDate)}`);
+    const opener = `Got it — ${parts.join(' ')}. Anything else to add, like the address, crew, or notes?`;
+    addMessage({ role: 'assistant', content: opener });
+    speakAndListen(opener, 'openended');
+  }, [addMessage, speakAndListen]);
+
   const openJobFormWithCustomer = useCallback((customer, targetDate, jobType) => {
     const prefill = {
       billToName:         customer?.name        || '',
@@ -403,13 +440,8 @@ export default function AIAssistantPanel() {
       isExistingCustomer: !!customer,
     };
     setCustomerPicker(null);
-    setTimeout(() => {
-      closePanel();
-      InteractionManager.runAfterInteractions(() => {
-        navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
-      });
-    }, 600);
-  }, [closePanel]);
+    askForExtraDetailsAndNavigate(prefill);
+  }, [askForExtraDetailsAndNavigate]);
 
   const handleSmartCreateJob = useCallback(async ({ typeHint, customer: customerHint, dayHint }) => {
     setIsProcessing(true);
@@ -481,6 +513,76 @@ export default function AIAssistantPanel() {
     setTextInput('');
     lastTextRef.current = '';
     addMessage({ role: 'user', content: trimmed });
+
+    // ── Voice confirmation: user is answering yes/no to a pending action ────
+    if (awaitingPendingConfirmationRef.current && localPending) {
+      awaitingPendingConfirmationRef.current = false;
+      if (isYes(trimmed)) {
+        handleConfirmRef.current?.();
+        return;
+      }
+      if (isNo(trimmed)) {
+        handleCancelRef.current?.();
+        return;
+      }
+      // Anything else → user changed topic; fall through and treat as a new turn.
+    }
+
+    // ── Smart-create follow-up: user is answering "anything else to add?" ───
+    if (smartCreateFollowupRef.current) {
+      const { prefill: pendingPrefill } = smartCreateFollowupRef.current;
+      smartCreateFollowupRef.current = null;
+
+      // Whole-message negation → navigate straight away.
+      if (/^(no|nothing|that'?s\s+it|skip|done|nope|nah|all\s+good)\.?\s*$/i.test(trimmed)) {
+        const msg = 'Okay, opening the form.';
+        addMessage({ role: 'assistant', content: msg });
+        speakText(msg);
+        navigateToJobFormWithPrefill(pendingPrefill);
+        return;
+      }
+
+      // Otherwise → let Claude parse the answer into additional fields.
+      setIsProcessing(true);
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const jobTypeNames = (jobTypes || [])
+          .map((t) => (typeof t === 'string' ? t : t?.name))
+          .filter(Boolean);
+        const extracted = await extractFlowFields({
+          userText:          trimmed,
+          fieldsToExtract:   ['jobLocationAddress', 'crewName', 'salesperson', 'notes', 'billToName', 'targetDate', 'jobType'],
+          availableCrews:    crews,
+          availableJobTypes: jobTypeNames,
+          today,
+        });
+
+        const merged = { ...pendingPrefill };
+        if (extracted.jobLocationAddress) merged.jobLocationAddress = extracted.jobLocationAddress;
+        if (extracted.salesperson)        merged.salesperson        = extracted.salesperson;
+        if (extracted.notes)              merged.notes              = extracted.notes;
+        if (extracted.billToName)         merged.billToName         = extracted.billToName;
+        if (extracted.targetDate)         merged.targetDate         = extracted.targetDate;
+        if (extracted.jobType)            merged.jobType            = extracted.jobType;
+        if (extracted.crewName) {
+          const cid = resolveCrewId(extracted.crewName, crews);
+          if (cid) merged.crewId = cid;
+        }
+
+        const summary = extracted.summary
+          ? `${extracted.summary} Opening the form.`
+          : 'Got it, opening the form.';
+        addMessage({ role: 'assistant', content: summary });
+        speakText(summary);
+        navigateToJobFormWithPrefill(merged);
+      } catch (err) {
+        addMessage({ role: 'assistant', content: 'Trouble parsing that — opening the form with what we have.' });
+        navigateToJobFormWithPrefill(pendingPrefill);
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
 
     // ── Smart job-create fast path ───────────────────────────────────────────
     // "New Job for Shamrock on Thursday" → resolve customer + date locally and
@@ -557,7 +659,12 @@ export default function AIAssistantPanel() {
         setLocalPending(result.pendingAction);
       }
 
-      if (!isCommand) {
+      if (isCommand && voiceSessionActive) {
+        // Voice-tap session: speak the proposal then auto-listen for yes/no.
+        // The Confirm/Cancel buttons stay visible as a fallback.
+        awaitingPendingConfirmationRef.current = true;
+        speakAndListen(result.message, 'yesno');
+      } else if (!isCommand) {
         speakText(result.message);
       }
     } catch (err) {
@@ -576,7 +683,8 @@ export default function AIAssistantPanel() {
     voiceFlow, handlePauseFlow, handleResumeFlow, handleFlowStep, handleFlowConfirmation,
     startVoiceFlow, setIsProcessing, stopAutoListen,
     customerPicker, handleSmartCreateJob,
-    activeJobs, crews,
+    activeJobs, crews, jobTypes,
+    voiceSessionActive, localPending, navigateToJobFormWithPrefill,
   ]);
 
   // Auto-submit voice transcript when panel opens
@@ -649,6 +757,8 @@ export default function AIAssistantPanel() {
   // Keep refs current so async auto-listen callbacks see latest closures
   handleSendRef.current      = handleSend;
   handlePauseFlowRef.current = handlePauseFlow;
+  handleConfirmRef.current   = handleConfirm;
+  handleCancelRef.current    = handleCancel;
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -853,7 +963,9 @@ export default function AIAssistantPanel() {
               placeholder={
                 voiceFlow && !voiceFlow.paused
                   ? (voiceFlow.confirming ? "Say 'yes' or 'no'…" : "Speak or type your answer…")
-                  : "Ask anything… (or tap 🎤 on keyboard)"
+                  : listenStatus === 'listening'
+                    ? 'Listening…'
+                    : 'Tap the mic to speak, or type here'
               }
               placeholderTextColor="#9ca3af"
               value={textInput}

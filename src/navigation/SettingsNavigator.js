@@ -10,6 +10,8 @@ import FinancialsScreen from '../screens/FinancialsScreen';
 import JobTypesScreen from '../screens/JobTypesScreen';
 import EditJobTypeScreen from '../screens/EditJobTypeScreen';
 import CompanyProfileScreen from '../screens/CompanyProfileScreen';
+import UserSetupScreen from '../screens/UserSetupScreen';
+import EditUserScreen from '../screens/EditUserScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -31,6 +33,8 @@ export default function SettingsNavigator() {
       <Stack.Screen name="JobTypes"        component={JobTypesScreen} />
       <Stack.Screen name="EditJobType"     component={EditJobTypeScreen} />
       <Stack.Screen name="CompanyProfile"  component={CompanyProfileScreen} />
+      <Stack.Screen name="UserSetup"       component={UserSetupScreen} />
+      <Stack.Screen name="EditUser"        component={EditUserScreen} />
     </Stack.Navigator>
   );
 }

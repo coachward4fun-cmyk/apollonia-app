@@ -3,10 +3,27 @@ import { TouchableOpacity, StyleSheet, Platform, View, Text, Animated } from 're
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
+import Constants from 'expo-constants';
 import { useAIAssistant } from '../context/AIAssistantContext';
 
 const GREEN = '#16a34a';
 const TAB_BAR_HEIGHT = Platform.OS === 'ios' ? 60 : 56;
+
+// Expo Go can't bundle the native expo-speech-recognition module — fall back
+// to the WebView speech recognizer there. Native builds (dev / preview /
+// production via EAS) get the proper Apple Speech framework via the module.
+const IS_EXPO_GO = Constants.appOwnership === 'expo';
+let SpeechModule = null;
+if (!IS_EXPO_GO) {
+  // Top-level require is guarded so Expo Go never tries to load the native code.
+  // Defensive try/catch so a missing/misconfigured native binary in an EAS
+  // build degrades to "no native speech" rather than crashing the whole bundle.
+  try {
+    SpeechModule = require('expo-speech-recognition').ExpoSpeechRecognitionModule;
+  } catch (e) {
+    console.warn('[SpeechModule] Failed to load expo-speech-recognition:', e.message);
+  }
+}
 
 // Hidden WebView running iOS Web Speech API (webkitSpeechRecognition).
 // Supports two modes:
@@ -99,6 +116,7 @@ export default function FloatingMicButton() {
     listenStatus, setListenStatus,
     registerListenControls, deliverAutoListenResult,
     notifyAutoListenInterim, stopSpeaking,
+    startVoiceSession, endVoiceSession,
   } = useAIAssistant();
 
   const insets     = useSafeAreaInsets();
@@ -110,6 +128,9 @@ export default function FloatingMicButton() {
   const pulseLoop      = useRef(null);
   const statusRef      = useRef('idle');
   const listeningSource = useRef('manual'); // 'manual' | 'auto'
+  // Set when the user taps before the WebView has finished loading. The
+  // onLoadEnd effect below fires the recognition start as soon as it's ready.
+  const pendingAutoListenRef = useRef(false);
 
   useEffect(() => { statusRef.current = status; }, [status]);
 
@@ -156,22 +177,102 @@ export default function FloatingMicButton() {
 
   const bottomOffset = TAB_BAR_HEIGHT + insets.bottom + 4;
 
-  // ── Long-press: start manual recording ───────────────────────────────────────
+  // ── Single tap: open panel + start voice session + auto-listen (single utterance) ──
+  //
+  // The auto-mode WebView call stops on its own when the user pauses, so no
+  // press-out handling is needed. The result routes through submitVoiceText
+  // (listeningSource='manual') which fires handleSend automatically. The voice
+  // session keeps TTS on for the duration regardless of the user's voice toggle.
 
-  const handleLongPress = () => {
-    if (!webViewReady) { openPanel(); return; }
-    stopSpeaking(); // stop AI speech so mic picks up user, not speaker echo
+  // Native speech recognition (EAS builds only). Wires expo-speech-recognition
+  // events to the same submitVoiceText path the WebView uses, so handleSend
+  // sees no difference between the two paths.
+  useEffect(() => {
+    if (IS_EXPO_GO || !SpeechModule) return;
+
+    const resultSub = SpeechModule.addListener('result', (event) => {
+      const transcript = event.results?.[0]?.transcript;
+      if (event.isFinal && transcript) {
+        setStatus('idle');
+        setListenStatus('idle');
+        submitVoiceText(transcript);
+      }
+    });
+
+    const endSub = SpeechModule.addListener('end', () => {
+      setStatus('idle');
+      setListenStatus('idle');
+    });
+
+    const errorSub = SpeechModule.addListener('error', (event) => {
+      console.warn('[SpeechNative] error:', event.error);
+      setStatus('idle');
+      setListenStatus('idle');
+    });
+
+    return () => {
+      resultSub.remove();
+      endSub.remove();
+      errorSub.remove();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTap = () => {
+    console.log('[TAP] fired — IS_EXPO_GO:', IS_EXPO_GO, 'webViewReady:', webViewReady, 'status:', statusRef.current);
+
+    if (statusRef.current === 'listening') {
+      openPanel();
+      return;
+    }
+
+    stopSpeaking();
+    startVoiceSession();
+    openPanel();
     listeningSource.current = 'manual';
     setStatus('listening');
-    webViewRef.current?.injectJavaScript('startRecognition(false); true;');
+    setListenStatus('listening');
+
+    if (IS_EXPO_GO || !SpeechModule) {
+      // Expo Go OR native build where SpeechModule failed to load — fall back
+      // to the WebView recognizer so the user still gets voice input.
+      if (!webViewReady) {
+        console.log('[TAP] WebView path — not ready, queuing');
+        pendingAutoListenRef.current = true;
+        return;
+      }
+      console.log('[TAP] WebView path — injecting startRecognition');
+      webViewRef.current?.injectJavaScript('startRecognition(true); true;');
+    } else {
+      // Native build path — starts programmatically, single tap
+      console.log('[TAP] Native — starting expo-speech-recognition');
+      SpeechModule.requestPermissionsAsync().then(({ granted }) => {
+        if (granted) {
+          SpeechModule.start({ lang: 'en-US', interimResults: false, continuous: false });
+        } else {
+          console.warn('[SpeechNative] microphone permission denied');
+          setStatus('idle');
+          setListenStatus('idle');
+          endVoiceSession();
+        }
+      });
+    }
   };
 
-  // ── Release: stop manual recording ───────────────────────────────────────────
+  // Drain the queued auto-listen the moment the WebView finishes loading.
+  // Only relevant in Expo Go; native builds never enter the queued state.
+  useEffect(() => {
+    if (webViewReady && pendingAutoListenRef.current) {
+      pendingAutoListenRef.current = false;
+      webViewRef.current?.injectJavaScript('startRecognition(true); true;');
+    }
+  }, [webViewReady]);
 
-  const handlePressOut = () => {
-    if (statusRef.current !== 'listening' || listeningSource.current !== 'manual') return;
-    setStatus('processing');
-    webViewRef.current?.injectJavaScript('stopRecognition(); true;');
+  // ── Long press: open panel for typed input (no mic) ──────────────────────────
+  //
+  // Power-user fallback. No visible cue — the user has to know it's available.
+
+  const handleLongPress = () => {
+    openPanel();
   };
 
   // ── WebView message handler ───────────────────────────────────────────────────
@@ -197,6 +298,7 @@ export default function FloatingMicButton() {
         deliverAutoListenResult(text);
       } else {
         setStatus('idle');
+        setListenStatus('idle');
         if (text) {
           submitVoiceText(text);
         } else if (isOpen) {
@@ -255,9 +357,8 @@ export default function FloatingMicButton() {
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
               style={[styles.button, { backgroundColor: bgColor }]}
-              onPress={status === 'idle' ? openPanel : undefined}
+              onPress={handleTap}
               onLongPress={handleLongPress}
-              onPressOut={handlePressOut}
               delayLongPress={400}
               activeOpacity={0.85}
             >

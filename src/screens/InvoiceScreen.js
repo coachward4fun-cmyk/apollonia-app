@@ -38,7 +38,7 @@ const DEFAULT_LINE_ITEMS = [
 export default function InvoiceScreen() {
   const navigation   = useNavigation();
   const route        = useRoute();
-  const { activeJobs: jobs, crews } = useAppData();
+  const { activeJobs: jobs, crews, customers } = useAppData();
 
   const [companyProfile, setCompanyProfile] = useState(null);
   const [refreshing,     setRefreshing]    = useState(false);
@@ -242,6 +242,7 @@ export default function InvoiceScreen() {
       <InvoiceWizard
         visible={showWizard}
         companyProfile={companyProfile}
+        customers={customers}
         preselectedJob={selectedJob}
         onClose={() => { setShowWizard(false); setSelectedJobId(null); }}
         onSave={handleSaveInvoice}
@@ -381,7 +382,7 @@ function JobPickerModal({ visible, jobs, onSelect, onClose }) {
 
 // ── InvoiceWizard ──────────────────────────────────────────────────────────────
 
-function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSave, onEditJob }) {
+function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob, onClose, onSave, onEditJob }) {
   const [step,      setStep]      = useState(2);
   const [selJob,    setSelJob]    = useState(null);
   const [invNumber, setInvNumber] = useState('');
@@ -431,8 +432,11 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
       setInvDate(preselectedJob.invoiceDate || today());
       setDueDate(preselectedJob.dueDate || addDays(today(), 30));
 
+      const customer = customers.find((c) => c.name === preselectedJob.billToName);
+      const isRetail = customer?.retail === true; // unset/false/undefined = non-retail
       const detected = detectTaxRate(preselectedJob.jobLocationAddress, companyProfile?.taxRates);
-      const savedRate = preselectedJob.taxRate != null ? preselectedJob.taxRate : detected.rate;
+      const effectiveRate = isRetail ? detected.rate : 0;
+      const savedRate = preselectedJob.taxRate != null ? preselectedJob.taxRate : effectiveRate;
       const savedLabel = preselectedJob.taxLabel != null ? preselectedJob.taxLabel : detected.label;
       setTaxRate(String(savedRate));
       setTaxLabel(savedLabel);
@@ -684,7 +688,7 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
       // Email succeeded — save with Invoice Sent status
       const sentJob = { ...invoiceData, status: 'Invoice Sent' };
       await saveJob(sentJob);
-      logActivity('invoice_sent', `Sent invoice #${invNumber.trim()} to ${selJob.email}`);
+      logActivity('invoice_sent', `Sent invoice #${invNumber.trim()} — ${selJob.projectName || 'job'}${selJob.billToName ? ` (${selJob.billToName})` : ''} to ${selJob.email}`);
       setSending(false);
       setToast('Invoice sent and job status updated to Invoice Sent');
       setTimeout(() => { reset(); onClose(); }, 2200);
@@ -1053,7 +1057,7 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
                     <View style={styles.totalRow}>
                       <View>
                         <Text style={styles.totalLabel}>Tax</Text>
-                        <Text style={styles.taxSubLabel}>{taxDisplay}</Text>
+                        <Text style={styles.taxSubLabel}>{taxDisplay}{taxRateNum === 0 ? ' *' : ''}</Text>
                       </View>
                       <Text style={styles.totalValue}>{fmtDecimal(tax)}</Text>
                     </View>
@@ -1064,6 +1068,12 @@ function InvoiceWizard({ visible, companyProfile, preselectedJob, onClose, onSav
                     </View>
                   </View>
                 </View>
+
+                {taxRateNum === 0 && (
+                  <Text style={styles.taxFootnote}>
+                    * This invoice reflects non-retail services in support of Real Property improvement
+                  </Text>
+                )}
 
                 <TouchableOpacity
                   style={styles.photosBtn}
@@ -1527,6 +1537,7 @@ const styles = StyleSheet.create({
   totalLabelBold: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
   totalValueBold: { fontSize: 18, fontWeight: '800', color: colors.primary },
   taxSubLabel: { fontSize: 10, color: colors.textMuted, marginTop: 1 },
+  taxFootnote: { fontSize: 10, fontStyle: 'italic', color: colors.textMuted, marginTop: 4, marginBottom: 12, lineHeight: 14 },
   totalsDivider: { height: 1, backgroundColor: '#e5e7eb', marginVertical: 8 },
 
   lockBadge: {

@@ -36,7 +36,6 @@ yarn-error.*
 
 # secrets — must never be committed
 *-firebase-adminsdk-*.json
-src/config/anthropic.js
 
 # Cloud Functions build artifacts
 functions/node_modules/

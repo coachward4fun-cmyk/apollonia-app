@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   ScrollView, TouchableOpacity, TextInput,
-  Alert, ActivityIndicator, Animated,
+  Alert, ActivityIndicator, Animated, Switch,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,6 +23,7 @@ export default function CustomerEditScreen() {
   const [address,     setAddress]     = useState('');
   const [email,       setEmail]       = useState('');
   const [salesperson, setSalesperson] = useState('');
+  const [retail,      setRetail]      = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [archiving,   setArchiving]   = useState(false);
   const [successMsg,  setSuccessMsg]  = useState('');
@@ -47,6 +48,7 @@ export default function CustomerEditScreen() {
           if (saved.address)     setAddress(saved.address);
           if (saved.email)       setEmail(saved.email);
           if (saved.salesperson) setSalesperson(saved.salesperson);
+          setRetail(saved.retail === true);
         }
       } catch {}
     })();
@@ -106,6 +108,7 @@ export default function CustomerEditScreen() {
         address:     address.trim(),
         email:       email.trim(),
         salesperson: salesperson.trim(),
+        retail,
         updatedAt:   new Date().toISOString(),
       });
       showSuccess('Customer updated. Changes apply to future jobs only.');
@@ -160,6 +163,20 @@ export default function CustomerEditScreen() {
           autoCapitalize="none"
         />
         <Field label="SALESPERSON" value={salesperson} onChange={setSalesperson} placeholder="Salesperson name" />
+
+        <View style={styles.toggleWrap}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.toggleLabel}>Retail Customer</Text>
+            <Text style={styles.toggleSub}>Sales tax applies to retail customers</Text>
+          </View>
+          <Switch
+            value={retail}
+            onValueChange={setRetail}
+            trackColor={{ false: '#d1d5db', true: '#86efac' }}
+            thumbColor={retail ? colors.primary : '#9ca3af'}
+            ios_backgroundColor="#d1d5db"
+          />
+        </View>
 
         <TouchableOpacity
           style={[styles.archiveBtn, (archiving || saving) && { opacity: 0.5 }]}
@@ -264,6 +281,23 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     paddingVertical: 2,
   },
+
+  toggleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  toggleLabel: { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  toggleSub:   { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
 
   archiveBtn: {
     flexDirection: 'row',

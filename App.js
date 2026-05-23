@@ -1,19 +1,57 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet, Image, Alert } from 'react-native';
+import { View, Text, ActivityIndicator, StyleSheet, Image, Alert, AppState } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
 import { AIAssistantProvider } from './src/context/AIAssistantContext';
-import { AppDataProvider } from './src/context/AppDataContext';
+import { AppDataProvider, useAppData } from './src/context/AppDataContext';
 import AppNavigator from './src/navigation/AppNavigator';
-import LoginScreen from './src/screens/LoginScreen';
+import { signInAnonymously } from 'firebase/auth';
+import { auth } from './src/config/firebase';
 import FloatingMicButton from './src/components/FloatingMicButton';
 import AIAssistantPanel from './src/components/AIAssistantPanel';
 import { ensureFirestoreData } from './src/utils/ensureFirestoreData';
-import { backfillJobIds } from './src/services/db';
+import { backfillJobIds, saveJob } from './src/services/db';
 import { ExpiryBanner, ExpiryBlockScreen } from './src/components/ExpiryWarning';
 import { colors } from './src/theme/colors';
+import usePushToken from './src/hooks/usePushToken';
+import SelfClaimModal from './src/components/SelfClaimModal';
+import { notifyCrewViaWhatsApp } from './src/utils/notifyCrewViaWhatsApp';
+
+// Foreground notification presentation — show banner + sound, no badge.
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// Register interactive action buttons for crew-related push notifications.
+// Called once at app start; categoryId on each push payload selects the matching set.
+async function registerNotificationCategories() {
+  await Notifications.setNotificationCategoryAsync('CREW_REMINDER', [
+    {
+      identifier: 'NOTIFY_WHATSAPP',
+      buttonTitle: 'Notify via WhatsApp',
+      options: { isDestructive: false, isAuthenticationRequired: false, opensAppToForeground: true },
+    },
+    {
+      identifier: 'DISMISS_LOCAL',
+      buttonTitle: 'Dismiss',
+      options: { isDestructive: true, isAuthenticationRequired: false, opensAppToForeground: false },
+    },
+  ]);
+  await Notifications.setNotificationCategoryAsync('CREW_NEEDED', [
+    {
+      identifier: 'DISMISS_LOCAL',
+      buttonTitle: 'Dismiss',
+      options: { isDestructive: true, isAuthenticationRequired: false, opensAppToForeground: false },
+    },
+  ]);
+}
 
 // ── Loading / seeding screen ───────────────────────────────────────────────────
 
@@ -54,9 +92,70 @@ const seedStyles = StyleSheet.create({
 
 function RootContent() {
   const { user } = useAuth();
+  const { activeJobs: jobs, crews } = useAppData();
   const [appStatus,  setAppStatus]  = useState('checking');
   const [seedMsg,    setSeedMsg]    = useState('');
   const checkedUid = useRef(null);
+  const anonAttempted = useRef(false);
+
+  // Request push permission + write the Expo push token to users/{uid}.
+  // The hook short-circuits while `user` is undefined/null.
+  usePushToken(user);
+
+  // Register notification action buttons once at mount.
+  useEffect(() => {
+    registerNotificationCategories().catch((err) =>
+      console.warn('[notifications] category setup failed:', err)
+    );
+  }, []);
+
+  // Handle taps on notification action buttons. The "Notify via WhatsApp" action
+  // opens WhatsApp prefilled to the crew lead and marks the job as crewNotified.
+  useEffect(() => {
+    const sub = Notifications.addNotificationResponseReceivedListener(async (response) => {
+      const { actionIdentifier, notification } = response;
+      if (actionIdentifier !== 'NOTIFY_WHATSAPP') return; // DISMISS_LOCAL needs no handling
+      const { crewId, jobIds } = notification.request.content.data || {};
+      if (!crewId) return;
+      const crew = crews.find((c) => c.id === crewId);
+      const jobId = Array.isArray(jobIds) ? jobIds[0] : null;
+      const job = jobId
+        ? jobs.find((j) => j.id === jobId)
+        : jobs.find((j) => j.crewId === crewId);
+      if (!job || !crew) {
+        console.warn('[notifications] could not find job/crew for action', { crewId, jobId });
+        return;
+      }
+      try {
+        await saveJob({ id: job.id, crewNotifiedAt: new Date().toISOString() });
+      } catch (err) {
+        console.warn('[notifications] saveJob failed:', err);
+      }
+      await notifyCrewViaWhatsApp(job, crew);
+    });
+    return () => sub.remove();
+  }, [jobs, crews]);
+
+  // Clear the app icon badge whenever the app comes to the foreground.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        Notifications.setBadgeCountAsync(0).catch(() => {});
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Silently bootstrap an anonymous Firebase user when no user is signed in.
+  // No Login UI — the spinner below covers the brief in-flight window.
+  useEffect(() => {
+    if (user === null && !anonAttempted.current) {
+      anonAttempted.current = true;
+      signInAnonymously(auth).catch((err) =>
+        console.warn('Anonymous sign-in failed:', err)
+      );
+    }
+  }, [user]);
 
   useEffect(() => {
     if (user === undefined) return; // auth state still loading
@@ -107,13 +206,12 @@ function RootContent() {
     );
   }
 
-  // ── Not logged in ─────────────────────────────────────────────────────────
+  // ── No user yet: anonymous sign-in is in-flight ──────────────────────────
   if (!user) {
     return (
-      <>
-        <StatusBar style="dark" />
-        <LoginScreen />
-      </>
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f9fafb' }}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
     );
   }
 
@@ -146,6 +244,7 @@ function RootContent() {
       <ExpiryBanner />
       <FloatingMicButton />
       <AIAssistantPanel />
+      <SelfClaimModal user={user} />
     </View>
   );
 }

@@ -15,6 +15,7 @@ const AppDataContext = createContext({
   jobsLoading: true,
   crewsLoading: true,
   customersLoading: true,
+  lastSync: null,
   refreshCrews: () => {},
   refreshJobTypes: () => {},
   refreshEmailConfig: () => {},
@@ -29,6 +30,9 @@ export function AppDataProvider({ children }) {
   const [jobsLoading,      setJobsLoading]      = useState(true);
   const [crewsLoading,     setCrewsLoading]     = useState(true);
   const [customersLoading, setCustomersLoading] = useState(true);
+  // Wall-clock time of the most recent jobs snapshot — shown on the Dashboard
+  // so the user can tell at a glance how fresh the data is.
+  const [lastSync,         setLastSync]         = useState(new Date());
 
   // One-time guard so we only run the legacy phone normalization sweep on the
   // first crews snapshot — not on every real-time update.
@@ -39,6 +43,7 @@ export function AppDataProvider({ children }) {
     const unsubJobs = subscribeJobs((list) => {
       setJobs(list);
       setJobsLoading(false);
+      setLastSync(new Date());
     });
     const unsubCrews = subscribeCrews((list) => {
       setCrews(list);
@@ -102,12 +107,13 @@ export function AppDataProvider({ children }) {
     jobsLoading,
     crewsLoading,
     customersLoading,
+    lastSync,
     refreshCrews,
     refreshJobTypes,
     refreshEmailConfig,
   }), [
     jobs, activeJobs, crews, customers, jobTypes, emailConfig,
-    jobsLoading, crewsLoading, customersLoading,
+    jobsLoading, crewsLoading, customersLoading, lastSync,
     refreshCrews, refreshJobTypes, refreshEmailConfig,
   ]);
 

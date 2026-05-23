@@ -13,6 +13,7 @@ import { uploadCompanyLogo } from '../services/storageService';
 import { requestPhotoLibraryPermission } from '../utils/permissions';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
+import AddressAutocomplete from '../components/AddressAutocomplete';
 
 const TAX_FIELDS = [
   { key: 'omaha',       label: 'Omaha',        sub: '5.5% NE state + 1.5% city' },
@@ -250,7 +251,15 @@ export default function CompanyProfileScreen() {
           <View style={styles.card}>
             <Field label="COMPANY NAME" value={companyName} onChange={setCompanyName} placeholder="Apollonia Construction LLC" />
             <Divider />
-            <Field label="ADDRESS" value={address} onChange={setAddress} placeholder="123 Main St, City, ST 12345" multiline />
+            <View style={styles.fieldWrap}>
+              <Text style={styles.fieldLabel}>ADDRESS</Text>
+              <AddressAutocomplete
+                value={address}
+                onChangeText={setAddress}
+                placeholder="123 Main St, City, ST 12345"
+                flat
+              />
+            </View>
             <Divider />
             <Field label="PHONE" value={phone} onChange={setPhone} placeholder="555-555-5555" keyboardType="phone-pad" autoCapitalize="none" />
             <Divider />

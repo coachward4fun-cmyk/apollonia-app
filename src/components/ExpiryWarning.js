@@ -5,10 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-
-// ─── Update this date when renewing the app subscription ─────────────────────
-const APP_EXPIRY = '2026-08-04';
-// ─────────────────────────────────────────────────────────────────────────────
+import { useBuildExpiry, calcDaysLeft } from '../hooks/useBuildExpiry';
 
 const DISMISSED_KEY = 'apollonia:warningDismissed';
 
@@ -17,13 +14,6 @@ function todayString() {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${d.getFullYear()}-${mm}-${dd}`;
-}
-
-function getDaysLeft() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const expiry = new Date(APP_EXPIRY + 'T00:00:00');
-  return Math.floor((expiry - today) / (1000 * 60 * 60 * 24));
 }
 
 function getWarningMessage(daysLeft) {
@@ -46,7 +36,10 @@ function getWarningMessage(daysLeft) {
 
 export function ExpiryBlockScreen() {
   const insets = useSafeAreaInsets();
-  const isExpired = getDaysLeft() <= 0;
+  const { expiryDate, loading } = useBuildExpiry();
+  // While loading or if the doc is missing, don't block — let the app render
+  // normally rather than wedging the user behind a modal on stale state.
+  const isExpired = !loading && !!expiryDate && calcDaysLeft(expiryDate) <= 0;
   return (
     <Modal visible={isExpired} animationType="none" statusBarTranslucent>
       <View style={[blockStyles.container, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 24 }]}>
@@ -86,19 +79,22 @@ export function ExpiryBlockScreen() {
 
 export function ExpiryBanner() {
   const insets = useSafeAreaInsets();
+  const { expiryDate, loading } = useBuildExpiry();
   const [dismissed, setDismissed] = useState(false);
   const [ready, setReady]         = useState(false);
 
-  const daysLeft = getDaysLeft();
+  const daysLeft = expiryDate ? calcDaysLeft(expiryDate) : null;
 
   useEffect(() => {
+    if (loading || daysLeft == null) return;
     if (daysLeft > 10 || daysLeft <= 0) { setReady(true); return; }
     AsyncStorage.getItem(DISMISSED_KEY).then((stored) => {
       if (stored === todayString()) setDismissed(true);
       setReady(true);
     });
-  }, []);
+  }, [loading, daysLeft]);
 
+  if (loading || daysLeft == null) return null;
   if (!ready) return null;
   if (daysLeft > 10 || daysLeft <= 0) return null; // no banner (expired handled separately)
 

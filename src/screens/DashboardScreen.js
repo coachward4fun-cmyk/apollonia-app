@@ -145,7 +145,7 @@ export default function DashboardScreen() {
   const navigation = useNavigation();
   const { width }  = useWindowDimensions();
   const isPad      = Platform.OS === 'ios' && Platform.isPad;
-  const { activeJobs: jobs } = useAppData();
+  const { activeJobs: jobs, crews, customers, lastSync } = useAppData();
   const [refreshing,   setRefreshing]   = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
 
@@ -169,6 +169,25 @@ export default function DashboardScreen() {
   }), [stats]);
 
   const scheduledWithCrew = stats.scheduled - stats.scheduledNoCrew;
+
+  // Crews with no upcoming work — used by the 4th Pipeline box.
+  const crewsNoJob = useMemo(() => {
+    const tomorrowStr = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      return d.toISOString().slice(0, 10);
+    })();
+    const busyCrewIds = new Set(
+      jobs
+        .filter((j) =>
+          j.targetDate >= tomorrowStr &&
+          !['invoice paid', 'invoice sent'].includes((j.status || '').toLowerCase())
+        )
+        .map((j) => j.crewId)
+        .filter(Boolean)
+    );
+    return crews.filter((c) => !busyCrewIds.has(c.id)).length;
+  }, [jobs, crews]);
 
   const { weekStart, weekEnd, weekJobs, weekPaidJobs, weekUnpaidJobs, weekCrewCost, weekPaidCost, weekUnpaidCost } = useMemo(() => {
     const { start, end } = getPayWeekRange();
@@ -206,17 +225,15 @@ export default function DashboardScreen() {
           />
           <Text style={styles.headerDate}>{formatDate(TODAY)}</Text>
         </View>
+        {lastSync ? (
+          <Text style={styles.lastUpdated}>
+            Updated: {lastSync.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+          </Text>
+        ) : null}
 
         {/* Job Pipeline */}
         <SectionLabel title="Job Pipeline" />
-        <View style={styles.threeRow}>
-          <PipelineBox
-            label="Not Scheduled"
-            value={stats.notScheduled}
-            accent="#6b7280"
-            disabled={stats.notScheduled === 0}
-            onPress={() => navToJobs({ filter: 'Not Scheduled' })}
-          />
+        <View style={styles.fourRow}>
           <PipelineBox
             label="Scheduled"
             value={scheduledWithCrew}
@@ -225,10 +242,24 @@ export default function DashboardScreen() {
             onPress={() => navToJobs({ filter: 'Scheduled With Crew' })}
           />
           <PipelineBox
+            label="Not Scheduled"
+            value={stats.notScheduled}
+            accent="#6b7280"
+            disabled={stats.notScheduled === 0}
+            onPress={() => navToJobs({ filter: 'Not Scheduled' })}
+          />
+          <PipelineBox
             label="Sched / No Crew"
             value={stats.scheduledNoCrew}
             accent="#d97706"
             disabled={stats.scheduledNoCrew === 0}
+            onPress={() => navToJobs({ filter: 'Scheduled No Crew' })}
+          />
+          <PipelineBox
+            label="Crews no job"
+            value={crewsNoJob}
+            accent="#dc2626"
+            disabled={crewsNoJob === 0}
             onPress={() => navToJobs({ filter: 'Scheduled No Crew' })}
           />
         </View>
@@ -319,6 +350,20 @@ export default function DashboardScreen() {
             disabled={weekUnpaidJobs.length === 0}
             onPress={() => navToJobs({ weekStart, weekEnd, crewPay: 'unpaid' })}
           />
+        </View>
+
+        <SectionLabel title="Customers" />
+        <View style={styles.threeRow}>
+          <TouchableOpacity
+            style={styles.pipelineBox}
+            onPress={() => navigation.navigate('Admin', { screen: 'CustomerList' })}
+            activeOpacity={0.72}
+          >
+            <Text style={[styles.pipelineValue, { color: colors.primary }]}>
+              {customers.filter((c) => !c.archived).length}
+            </Text>
+            <Text style={styles.pipelineLabel}>Total Customers</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Reports — moved here from Admin so they're one tap from the dashboard. */}
@@ -660,6 +705,7 @@ const styles = StyleSheet.create({
   },
   logoImage: { height: 50, width: 200, resizeMode: 'contain' },
   headerDate: { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
+  lastUpdated: { fontSize: 11, color: colors.textMuted, marginTop: 2, marginBottom: 12, textAlign: 'right' },
 
   sectionTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   sectionTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, letterSpacing: 0.2 },

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "apollonia",
+    "name": "Apollonia",
     "slug": "apollonia",
     "version": "1.0.0",
     "scheme": "apolloniaconstruction",
@@ -9,9 +9,9 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#16a34a"
     },
     "ios": {
       "supportsTablet": true,
@@ -22,7 +22,12 @@
         "NSMicrophoneUsageDescription": "Apollonia Assistant needs microphone access for voice commands",
         "NSSpeechRecognitionUsageDescription": "Apollonia Assistant uses speech recognition to understand your voice commands",
         "ITSAppUsesNonExemptEncryption": false,
-        "LSApplicationQueriesSchemes": ["maps"]
+        "LSApplicationQueriesSchemes": [
+          "maps",
+          "whatsapp",
+          "comgooglemaps",
+          "comgoogleearth"
+        ]
       },
       "bundleIdentifier": "com.apolloniaconstruction.app"
     },
@@ -48,6 +53,14 @@
         {
           "photosPermission": "Apollonia needs photo library access to attach photos to jobs and expenses",
           "cameraPermission": "Apollonia needs camera access to take job site photos and expense receipts"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#16a34a",
+          "sounds": []
         }
       ]
     ],

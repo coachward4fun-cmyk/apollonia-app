@@ -10,6 +10,9 @@ import {
   TouchableOpacity,
   TextInput,
   Platform,
+  Image,
+  Linking,
+  Alert,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,6 +20,9 @@ import { colors } from '../theme/colors';
 import { statusStyle } from '../theme/statusColors';
 import { useAppData } from '../context/AppDataContext';
 import { SkeletonCard } from '../components/SkeletonLoader';
+import { notifyCrewViaWhatsApp } from '../utils/notifyCrewViaWhatsApp';
+import { saveJob } from '../services/db';
+import { openInMaps } from '../utils/openInMaps';
 
 const PAGE_SIZE = 25;
 
@@ -164,6 +170,18 @@ export default function JobsScreen() {
     setCrewPayFilter(null);
     setSearch('');
   }, []);
+
+  const handleNotifyCrew = useCallback(async (job) => {
+    const crew = crews.find((c) => c.id === job.crewId);
+    if (!job.crewNotifiedAt) {
+      try {
+        await saveJob({ id: job.id, crewNotifiedAt: new Date().toISOString() });
+      } catch (err) {
+        console.warn('Failed to mark crewNotifiedAt:', err);
+      }
+    }
+    await notifyCrewViaWhatsApp(job, crew);
+  }, [crews]);
 
   const crewInfo = useCallback((crewId) => {
     const c = crews.find((c) => c.id === crewId);
@@ -400,10 +418,32 @@ export default function JobsScreen() {
                 ) : null}
 
                 {job.jobLocationAddress ? (
-                  <View style={styles.metaRow}>
+                  <TouchableOpacity
+                    style={styles.metaRow}
+                    onPress={() => openInMaps(job.jobLocationAddress)}
+                    activeOpacity={0.7}
+                  >
                     <Ionicons name="location-outline" size={13} color="#2563eb" />
                     <Text style={styles.metaText} numberOfLines={1}>{job.jobLocationAddress}</Text>
-                  </View>
+                    <Image
+                      style={styles.mapThumb}
+                      source={{
+                        uri: `https://maps.googleapis.com/maps/api/staticmap?center=${encodeURIComponent(job.jobLocationAddress)}&zoom=15&size=80x80&scale=2&key=${process.env.EXPO_PUBLIC_GOOGLE_PLACES_KEY}`,
+                      }}
+                    />
+                    <TouchableOpacity
+                      style={styles.earthBtn}
+                      onPress={() =>
+                        Linking.openURL(`https://earth.google.com/web/search/${encodeURIComponent(job.jobLocationAddress)}`)
+                          .catch(() =>
+                            Alert.alert('Google Earth not installed', 'Install Google Earth from the App Store to use this feature.')
+                          )
+                      }
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name="earth-outline" size={16} color="#16a34a" />
+                    </TouchableOpacity>
+                  </TouchableOpacity>
                 ) : null}
 
                 <View style={styles.divider} />
@@ -441,6 +481,29 @@ export default function JobsScreen() {
                       </Text>
                     )}
                   </View>
+
+                  {info && (
+                    <TouchableOpacity
+                      style={[
+                        styles.notifyBtn,
+                        job.crewNotifiedAt && styles.notifyBtnDone,
+                      ]}
+                      onPress={() => handleNotifyCrew(job)}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Ionicons
+                        name={job.crewNotifiedAt ? 'checkmark-done-circle' : 'logo-whatsapp'}
+                        size={14}
+                        color={job.crewNotifiedAt ? '#16a34a' : '#25D366'}
+                      />
+                      <Text style={[
+                        styles.notifyBtnText,
+                        job.crewNotifiedAt && styles.notifyBtnTextDone,
+                      ]}>
+                        {job.crewNotifiedAt ? 'Notified' : 'Notify'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
 
                   <View style={styles.photosBadge}>
                     <Ionicons name="camera-outline" size={12} color={hasPhotos ? colors.textMuted : '#dc2626'} />
@@ -578,6 +641,33 @@ const styles = StyleSheet.create({
 
   photosBadge: { flexDirection: 'row', alignItems: 'center', gap: 3 },
   photosBadgeText: { fontSize: 11, color: colors.textMuted, fontWeight: '500' },
+
+  mapThumb: { width: 50, height: 40, borderRadius: 6, marginLeft: 6 },
+  earthBtn: { paddingHorizontal: 6, paddingVertical: 4, marginLeft: 2 },
+
+  notifyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1,
+    borderColor: '#bbf7d0',
+  },
+  notifyBtnDone: {
+    backgroundColor: '#ecfdf5',
+    borderColor: '#86efac',
+  },
+  notifyBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#16a34a',
+  },
+  notifyBtnTextDone: {
+    color: '#16a34a',
+  },
 
   emptyState: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },

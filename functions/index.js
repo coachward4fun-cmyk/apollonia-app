@@ -2,7 +2,6 @@ const { onRequest }   = require('firebase-functions/v2/https');
 const { onSchedule }  = require('firebase-functions/v2/scheduler');
 const admin           = require('firebase-admin');
 const nodemailer      = require('nodemailer');
-const Twilio          = require('twilio');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -71,15 +70,15 @@ exports.sendInvoiceEmail = onRequest(
   },
 );
 
-// ── Day-before SMS reminder ────────────────────────────────────────────────────
-// Runs daily at 5:00 PM Central Time (America/Chicago — handles DST automatically).
-// For each crew lead with jobs scheduled tomorrow, sends ONE SMS listing all of
-// their jobs for the next day. Leads with no jobs tomorrow get nothing.
+// ── Push notifications (Expo Push API) ────────────────────────────────────────
+// Three scheduled functions run on America/Chicago time. Each sends Expo push
+// messages to every user whose users/{uid} doc has notificationsEnabled === true
+// and a pushToken set by the app's usePushToken hook.
 // Requires Firebase Blaze plan. Deploy: firebase deploy --only functions
 
-function getTomorrowChicago() {
-  // Computes "tomorrow" as the next calendar day in America/Chicago, regardless
-  // of UTC offset or DST. Returns YYYY-MM-DD.
+function getTomorrowCentral() {
+  // DST-safe: derive today's Chicago calendar date via Intl, then add one day.
+  // Works correctly regardless of whether the scheduler fires during CST or CDT.
   const fmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Chicago',
     year:     'numeric',
@@ -96,113 +95,198 @@ function getTomorrowChicago() {
   return `${yy}-${mm}-${dd}`;
 }
 
-function fmtDateLong(dateStr) {
-  // Renders YYYY-MM-DD as e.g. "June 5, 2026" without timezone drift.
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.toLocaleDateString('en-US', {
-    timeZone: 'UTC',
-    month:    'long',
-    day:      'numeric',
-    year:     'numeric',
+async function sendExpoPush(messages) {
+  // messages: array of { to, title, body, data }
+  const response = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Accept-Encoding': 'gzip, deflate',
+    },
+    body: JSON.stringify(messages),
   });
+  const result = await response.json();
+  console.log('[push] Expo API response:', JSON.stringify(result));
+  return result;
 }
 
-function buildJobSMS(job, crew, dateStr) {
-  const lines = [
-    'Apollonia Construction',
-    'REMINDER: You have a job tomorrow',
-    `Job: ${job.projectName || 'Untitled'}`,
-  ];
-  if (job.jobType)            lines.push(`Job Type: ${job.jobType}`);
-  lines.push(`Date: ${fmtDateLong(dateStr)}`);
-  if (job.jobLocationAddress) {
-    lines.push(`Location: ${job.jobLocationAddress}`);
-    lines.push(`Map: https://maps.google.com/?q=${encodeURIComponent(job.jobLocationAddress)}`);
-  }
-  if (job.billToName)         lines.push(`Customer: ${job.billToName}`);
-  if (crew?.name)             lines.push(`Crew: ${crew.name}`);
-  const leadName   = crew?.lead?.name   || '';
-  const leadMobile = crew?.lead?.mobile || '';
-  if (leadName || leadMobile) {
-    lines.push(`Lead: ${[leadName, leadMobile].filter(Boolean).join(' ')}`);
-  }
-  lines.push('');
-  lines.push('Reply STOP to opt out');
-  return lines.join('\n');
+async function getNotifiableUsers() {
+  const snap = await db.collection('users').get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter((u) => u.notificationsEnabled === true && typeof u.pushToken === 'string' && u.pushToken.length > 0);
 }
 
-exports.dayBeforeReminder = onSchedule(
-  {
-    schedule:       '0 17 * * *',         // 17:00 (5 PM) in the named time zone
-    timeZone:       'America/Chicago',    // handles CST/CDT automatically
-    timeoutSeconds: 30,
-    memory:         '128MiB',
-  },
+function isClosedStatus(status) {
+  const s = (status || '').toLowerCase();
+  return s === 'invoice paid' || s === 'invoice sent';
+}
+
+async function getCrewMap() {
+  const snap = await db.collection('crews').get();
+  const map = {};
+  snap.docs.forEach((d) => { map[d.id] = d.data(); });
+  return map;
+}
+
+// ── A) morningCrewCheck — 9 AM Central daily ─────────────────────────────────
+// Alerts everyone if any of tomorrow's jobs are still missing a crew assignment.
+
+exports.morningCrewCheck = onSchedule(
+  { schedule: '0 9 * * *', timeZone: 'America/Chicago', timeoutSeconds: 30, memory: '128MiB' },
   async () => {
-    const tomorrowStr = getTomorrowChicago();
-    console.log('[dayBeforeReminder] Tomorrow (CT):', tomorrowStr);
-
-    const twilioSnap = await db.collection('meta').doc('twilioConfig').get();
-    if (!twilioSnap.exists) {
-      console.log('[dayBeforeReminder] No Twilio config — skipping.');
-      return;
-    }
-    const { accountSid, authToken, fromNumber } = twilioSnap.data();
-    if (!accountSid || !authToken || !fromNumber) {
-      console.log('[dayBeforeReminder] Incomplete Twilio config — skipping.');
-      return;
-    }
-    const twilio = Twilio(accountSid, authToken);
+    const tomorrowStr = getTomorrowCentral();
+    console.log('[morningCrewCheck] Tomorrow (CT):', tomorrowStr);
 
     const jobsSnap = await db.collection('jobs').where('targetDate', '==', tomorrowStr).get();
-    if (jobsSnap.empty) {
-      console.log('[dayBeforeReminder] No jobs for', tomorrowStr);
+    const unassigned = jobsSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((j) => !j.crewId && !isClosedStatus(j.status));
+
+    if (unassigned.length === 0) {
+      console.log('[morningCrewCheck] All tomorrow jobs have crews — nothing to do.');
       return;
     }
 
-    const crewsSnap = await db.collection('crews').get();
-    const crewMap   = {};
-    crewsSnap.docs.forEach((d) => { crewMap[d.id] = d.data(); });
-
-    // One SMS per eligible job. Skip jobs that are cancelled, archived, or
-    // unassigned, and skip crews without a lead mobile.
-    const eligibleJobs = [];
-    for (const jobDoc of jobsSnap.docs) {
-      const job = jobDoc.data();
-      if (!job.crewId)                              continue;
-      if (job.archivedForCustomer)                  continue;
-      if ((job.status || '').toLowerCase() === 'cancelled') continue;
-      if (!crewMap[job.crewId]?.lead?.mobile)       continue;
-      eligibleJobs.push(job);
+    const users = await getNotifiableUsers();
+    if (users.length === 0) {
+      console.log('[morningCrewCheck] No notifiable users.');
+      return;
     }
 
-    let smsSent = 0;
-    const totalJobs = eligibleJobs.length;
+    const n = unassigned.length;
+    const messages = users.map((u) => ({
+      to:         u.pushToken,
+      title:      '⚠️ Jobs need crews assigned',
+      body:       `${n} job${n === 1 ? '' : 's'} scheduled for tomorrow ${n === 1 ? 'has' : 'have'} no crew.`,
+      data:       { type: 'crew_needed', count: n },
+      categoryId: 'CREW_NEEDED',
+      badge:      n,
+    }));
 
-    for (const job of eligibleJobs) {
-      const crew = crewMap[job.crewId];
-      const body = buildJobSMS(job, crew, tomorrowStr);
+    await sendExpoPush(messages);
+    console.log(`[morningCrewCheck] Sent to ${users.length} user(s) about ${n} unassigned job(s).`);
+  },
+);
 
-      try {
-        await twilio.messages.create({ from: fromNumber, to: crew.lead.mobile, body });
-        await db.collection('activityLog').add({
-          action:    'day_before_reminder_sent',
-          detail:    `Day-before reminder sent to ${crew.name || 'crew'} for ${job.projectName || 'job'}`,
-          timestamp: admin.firestore.Timestamp.now(),
-        });
-        smsSent++;
-        console.log('[dayBeforeReminder] Sent to', crew.lead.mobile, '—', job.projectName);
-      } catch (err) {
-        console.error('[dayBeforeReminder] Failed for', crew.name || job.crewId, ':', err.message);
-        await db.collection('activityLog').add({
-          action:    'day_before_reminder_failed',
-          detail:    `SMS failed for ${crew.name || 'crew'}: ${err.message}`,
-          timestamp: admin.firestore.Timestamp.now(),
-        });
+// ── B) dayBeforeReminder — 5 PM Central daily ─────────────────────────────────
+// For each assigned crew with jobs tomorrow, alerts every notifiable user so any
+// of them can tap to send the WhatsApp Notify Crew message.
+
+exports.dayBeforeReminder = onSchedule(
+  { schedule: '0 17 * * *', timeZone: 'America/Chicago', timeoutSeconds: 30, memory: '128MiB' },
+  async () => {
+    const tomorrowStr = getTomorrowCentral();
+    console.log('[dayBeforeReminder] Tomorrow (CT):', tomorrowStr);
+
+    const jobsSnap = await db.collection('jobs').where('targetDate', '==', tomorrowStr).get();
+    const allTomorrow = jobsSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((j) => !isClosedStatus(j.status));
+    const assigned   = allTomorrow.filter((j) => !!j.crewId);
+    const unassigned = allTomorrow.filter((j) => !j.crewId);
+
+    if (assigned.length === 0) {
+      console.log('[dayBeforeReminder] No assigned jobs tomorrow.');
+      return;
+    }
+
+    const crewMap = await getCrewMap();
+    const byCrew  = {};
+    for (const j of assigned) (byCrew[j.crewId] = byCrew[j.crewId] || []).push(j);
+
+    const users = await getNotifiableUsers();
+    if (users.length === 0) {
+      console.log('[dayBeforeReminder] No notifiable users.');
+      return;
+    }
+
+    const messages = [];
+    const crewGroupBadge = Object.keys(byCrew).length;
+    for (const crewId of Object.keys(byCrew)) {
+      const crew = crewMap[crewId];
+      const crewName = crew?.name || 'crew';
+      const jobs = byCrew[crewId];
+      let title, body;
+      if (jobs.length === 1) {
+        title = `Tomorrow: ${jobs[0].projectName || 'Untitled'}`;
+        body  = `Tap to notify ${crewName} via WhatsApp`;
+      } else {
+        title = `Tomorrow: ${jobs.length} jobs for ${crewName}`;
+        body  = `${jobs.map((j) => j.projectName || 'Untitled').join(' + ')} — tap to notify`;
+      }
+      const data = { type: 'crew_reminder', crewId, jobIds: jobs.map((j) => j.id) };
+      for (const u of users) {
+        messages.push({ to: u.pushToken, title, body, data, categoryId: 'CREW_REMINDER', badge: crewGroupBadge });
       }
     }
 
-    console.log(`[dayBeforeReminder] Done — ${smsSent}/${totalJobs} SMS sent for ${tomorrowStr}.`);
+    await sendExpoPush(messages);
+    const crewGroupCount = Object.keys(byCrew).length;
+    console.log(`[dayBeforeReminder] Sent ${messages.length} push(es) for ${crewGroupCount} crew group(s).`);
+
+    const detailBase = `Sent reminders for ${crewGroupCount} crew group${crewGroupCount === 1 ? '' : 's'}.`;
+    const details = unassigned.length > 0
+      ? `${detailBase} ${unassigned.length} job${unassigned.length === 1 ? '' : 's'} still need${unassigned.length === 1 ? 's' : ''} a crew.`
+      : detailBase;
+    try {
+      await db.collection('activityLog').add({
+        action:    'day_before_reminder_sent',
+        details,
+        timestamp: admin.firestore.Timestamp.now(),
+      });
+    } catch (err) {
+      console.warn('[dayBeforeReminder] activityLog write failed:', err.message);
+    }
+  },
+);
+
+// ── C) eveningCrewReminder — 7 PM Central daily ───────────────────────────────
+// Nudges everyone if any crew hasn't been notified via WhatsApp yet (i.e., the
+// job still has no crewNotifiedAt timestamp).
+
+exports.eveningCrewReminder = onSchedule(
+  { schedule: '0 19 * * *', timeZone: 'America/Chicago', timeoutSeconds: 30, memory: '128MiB' },
+  async () => {
+    const tomorrowStr = getTomorrowCentral();
+    console.log('[eveningCrewReminder] Tomorrow (CT):', tomorrowStr);
+
+    const jobsSnap = await db.collection('jobs').where('targetDate', '==', tomorrowStr).get();
+    const unNotified = jobsSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((j) => !!j.crewId && !j.crewNotifiedAt && !isClosedStatus(j.status));
+
+    if (unNotified.length === 0) {
+      console.log('[eveningCrewReminder] All crews already notified — skipping.');
+      return;
+    }
+
+    const crewMap = await getCrewMap();
+    const byCrew  = {};
+    for (const j of unNotified) (byCrew[j.crewId] = byCrew[j.crewId] || []).push(j);
+
+    const users = await getNotifiableUsers();
+    if (users.length === 0) {
+      console.log('[eveningCrewReminder] No notifiable users.');
+      return;
+    }
+
+    const messages = [];
+    const crewGroupBadge = Object.keys(byCrew).length;
+    for (const crewId of Object.keys(byCrew)) {
+      const jobs = byCrew[crewId];
+      const title = jobs.length === 1
+        ? `⏰ Reminder: ${jobs[0].projectName || 'Untitled'}`
+        : `⏰ Reminder: ${jobs.length} jobs`;
+      const body = "Crew hasn't been notified yet — tap to notify via WhatsApp";
+      const data = { type: 'crew_reminder_followup', crewId, jobIds: jobs.map((j) => j.id) };
+      for (const u of users) {
+        messages.push({ to: u.pushToken, title, body, data, categoryId: 'CREW_REMINDER', badge: crewGroupBadge });
+      }
+    }
+
+    await sendExpoPush(messages);
+    console.log(`[eveningCrewReminder] Sent ${messages.length} push(es) for ${Object.keys(byCrew).length} un-notified crew group(s).`);
   },
 );

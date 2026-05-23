@@ -366,13 +366,21 @@ export async function saveEmailConfig(updates) {
   await setDoc(doc(db, 'meta', 'emailConfig'), updates, { merge: true });
 }
 
-// ── Twilio Config ──────────────────────────────────────────────────────────────
+// ── Users ──────────────────────────────────────────────────────────────────────
 
-export async function getTwilioConfig() {
-  const snap = await getDoc(doc(db, 'meta', 'twilioConfig'));
-  return snap.exists() ? snap.data() : null;
+export function subscribeUsers(callback) {
+  return onSnapshot(collection(db, 'users'), (snap) => {
+    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  }, (err) => {
+    console.error('[db] users subscription error:', err.code, err.message);
+    callback([]);
+  });
 }
 
-export async function saveTwilioConfig(updates) {
-  await setDoc(doc(db, 'meta', 'twilioConfig'), updates, { merge: true });
+export async function saveUser(user) {
+  await setDoc(doc(db, 'users', user.id), sanitize(user), { merge: true });
+}
+
+export async function deleteUser(id) {
+  await deleteDoc(doc(db, 'users', id));
 }

@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { db } from '../config/firebase';
 import {
-  collection, query, orderBy, limit, startAfter,
+  collection, query, where, orderBy, limit, startAfter,
   getDocs,
 } from 'firebase/firestore';
 import { useNavigation } from '@react-navigation/native';
@@ -13,13 +13,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 
 const PAGE_SIZE = 25;
+const TEN_DAYS_MS = 10 * 24 * 60 * 60 * 1000;
 
 function formatTimestamp(ts) {
   if (!ts) return { date: '—', time: '' };
   const d = ts.toDate ? ts.toDate() : new Date(ts);
   if (isNaN(d)) return { date: '—', time: '' };
   return {
-    date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    date: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
     time: d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
   };
 }
@@ -41,8 +42,9 @@ export default function ActivityLogScreen() {
   const fetchPage = useCallback(async (after = null) => {
     try {
       const col = collection(db, 'activityLog');
-      let q = query(col, orderBy('timestamp', 'desc'), limit(PAGE_SIZE));
-      if (after) q = query(col, orderBy('timestamp', 'desc'), startAfter(after), limit(PAGE_SIZE));
+      const cutoff = new Date(Date.now() - TEN_DAYS_MS);
+      let q = query(col, where('timestamp', '>=', cutoff), orderBy('timestamp', 'desc'), limit(PAGE_SIZE));
+      if (after) q = query(col, where('timestamp', '>=', cutoff), orderBy('timestamp', 'desc'), startAfter(after), limit(PAGE_SIZE));
 
       const HIDDEN_ACTIONS = new Set(['signed_in', 'signed_out', 'sign_in', 'sign_out']);
       const snap = await getDocs(q);

@@ -14,7 +14,7 @@ Response format when proposing a write action:
 {"message":"I'll [what you'll do]. Say YES to confirm or NO to cancel.","autoSpeak":true,"pendingAction":{"type":"ACTION_TYPE","description":"Human-readable summary","data":{...}}}
 
 Action types and their data fields:
-- CREATE_JOB: { title, customerName, address, targetDate (YYYY-MM-DD), status }
+- CREATE_JOB: { projectName, billToName, jobLocationAddress, targetDate (YYYY-MM-DD), status }
 - UPDATE_JOB_STATUS: { jobId, newStatus }
 - MARK_CREW_PAID: { jobId }
 - CREATE_EXPENSE: { description, amount, date (YYYY-MM-DD), category }
@@ -239,10 +239,19 @@ export async function executeAction(action) {
       if (action.data.status === 'Scheduled' && !action.data.targetDate) {
         throw new Error('A target date is required for Scheduled status. Provide a target date or use a different status.');
       }
-      const id  = `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      const job = { id, ...action.data, createdAt: new Date().toISOString() };
+      // Remap to the canonical job schema in case Claude emitted legacy field
+      // names (title/customerName/address) from an older prompt.
+      const job = {
+        id:                 `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        projectName:        action.data.projectName        || action.data.title        || '',
+        billToName:         action.data.billToName         || action.data.customerName || '',
+        jobLocationAddress: action.data.jobLocationAddress || action.data.address      || '',
+        targetDate:         action.data.targetDate         || '',
+        status:             action.data.status             || 'Scheduled',
+        createdAt:          new Date().toISOString(),
+      };
       await saveJob(job);
-      logActivity('ai_create_job', `AI created job: ${action.data.title || action.data.customerName || id}`);
+      logActivity('ai_create_job', `AI created job: ${job.projectName || job.billToName || job.id}`);
       return `Job created successfully.`;
     }
     case 'UPDATE_JOB_STATUS': {

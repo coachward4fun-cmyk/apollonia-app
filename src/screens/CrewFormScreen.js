@@ -5,8 +5,9 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { getCrews, saveCrew, deleteCrew } from '../services/db';
+import { getCrews, saveCrew, deleteCrew, saveJob } from '../services/db';
 import { useAuth } from '../context/AuthContext';
+import { useAppData } from '../context/AppDataContext';
 import { colors } from '../theme/colors';
 import { normalizePhone, formatPhoneDisplay } from '../utils/phoneUtils';
 
@@ -21,6 +22,7 @@ export default function CrewFormScreen() {
   const navigation = useNavigation();
   const { crewId } = useRoute().params;
   const { canWrite } = useAuth();
+  const { activeJobs } = useAppData();
   const isEdit = !!crewId;
 
   const [crewName, setCrewName] = useState('');
@@ -95,24 +97,36 @@ export default function CrewFormScreen() {
   };
 
   const handleDelete = () => {
-    if (!canWrite('crews')) {
-      Alert.alert('Access Restricted', 'You don\'t have permission to delete crews.');
-      return;
-    }
-    Alert.alert(
-      'Delete Crew',
-      `Remove "${crewName}"? This won't affect jobs already assigned to this crew.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete', style: 'destructive',
-          onPress: async () => {
+    if (!canWrite('crews')) return;
+    const closedStatuses = ['invoice paid', 'invoice sent'];
+    const activeJobCount = activeJobs.filter(
+      (j) => j.crewId === crewId &&
+      !closedStatuses.includes((j.status || '').toLowerCase())
+    ).length;
+
+    const message = activeJobCount > 0
+      ? `${crewName} has ${activeJobCount} active job${activeJobCount === 1 ? '' : 's'} assigned. Deleting this crew will remove their crew assignments. This cannot be undone.`
+      : `Delete "${crewName}"? This cannot be undone.`;
+
+    Alert.alert('Delete Crew', message, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            if (activeJobCount > 0) {
+              const affected = activeJobs.filter((j) => j.crewId === crewId);
+              await Promise.all(affected.map((j) => saveJob({ ...j, crewId: '' })));
+            }
             await deleteCrew(crewId);
             navigation.popTo('CrewsList');
-          },
+          } catch (err) {
+            Alert.alert('Error', err.message || 'Could not delete crew.');
+          }
         },
-      ]
-    );
+      },
+    ]);
   };
 
   return (

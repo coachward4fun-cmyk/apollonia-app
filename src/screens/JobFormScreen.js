@@ -87,6 +87,9 @@ export default function JobFormScreen() {
   const uploadPromisesRef = useRef({});
   // Keys of photos removed while still uploading — completion handler cleans Storage.
   const cancelledKeysRef = useRef(new Set());
+  // Status the job had when this form was opened — used to detect transitions
+  // (currently: log a dedicated entry when status flips to "Invoice Paid").
+  const originalStatusRef = useRef('');
 
   const crews    = contextCrews.length > 0 ? contextCrews : [];
   const jobTypes = contextJobTypes.length > 0 ? contextJobTypes.map((t) => t.name) : FALLBACK_JOB_TYPES;
@@ -154,6 +157,7 @@ export default function JobFormScreen() {
             setProjectName(job.projectName || '');
             setJobType(job.jobType || '');
             setStatus(job.status || 'Not Scheduled');
+            originalStatusRef.current = job.status || '';
             setTargetDate(job.targetDate || '');
             setBillToName(job.billToName || '');
             setBillToAddress(job.billToAddress || '');
@@ -455,6 +459,11 @@ export default function JobFormScreen() {
 
       const seqLabel = currentSeqId ? ` [${currentSeqId}]` : '';
       logActivity(isEdit ? 'job_updated' : 'job_created', `${isEdit ? 'Updated' : 'Created'} job: ${jobData.projectName}${seqLabel}`);
+
+      if (effectiveStatus === 'Invoice Paid' && originalStatusRef.current !== 'Invoice Paid') {
+        logActivity('invoice_paid', `Invoice paid — ${jobData.projectName || 'job'}${jobData.billToName ? ` (${jobData.billToName})` : ''}${seqLabel}`);
+        originalStatusRef.current = 'Invoice Paid';
+      }
 
       // Delete any Storage photos the user explicitly removed
       for (const url of removedUrls) {

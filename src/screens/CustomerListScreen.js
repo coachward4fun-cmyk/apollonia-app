@@ -135,22 +135,31 @@ export default function CustomerListScreen() {
           <Text style={styles.backText}>Settings</Text>
         </TouchableOpacity>
         <Text style={styles.navTitle}>{showArchived ? 'Archived' : 'Customers'}</Text>
-        <TouchableOpacity
-          style={styles.navRight}
-          onPress={() => { setShowArchived((v) => !v); setSearch(''); }}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons
-            name={showArchived ? 'people-outline' : 'eye-off-outline'}
-            size={19}
-            color={showArchived ? colors.primary : archivedCustomers.length > 0 ? '#b45309' : colors.textMuted}
-          />
-          {!showArchived && archivedCustomers.length > 0 && (
-            <View style={styles.archiveBadge}>
-              <Text style={styles.archiveBadgeText}>{archivedCustomers.length}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
+        <View style={styles.navRightGroup}>
+          <TouchableOpacity
+            style={styles.navArchiveBtn}
+            onPress={() => { setShowArchived((v) => !v); setSearch(''); }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons
+              name={showArchived ? 'people-outline' : 'eye-off-outline'}
+              size={19}
+              color={showArchived ? colors.primary : archivedCustomers.length > 0 ? '#b45309' : colors.textMuted}
+            />
+            {!showArchived && archivedCustomers.length > 0 && (
+              <View style={styles.archiveBadge}>
+                <Text style={styles.archiveBadgeText}>{archivedCustomers.length}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.newCustomerBtn}
+            onPress={() => navigation.navigate('CustomerEdit', { customerName: '' })}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="add" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.searchWrap}>
@@ -273,7 +282,16 @@ const styles = StyleSheet.create({
   backBtn: { flexDirection: 'row', alignItems: 'center', gap: 2, width: 80 },
   backText: { fontSize: 16, color: colors.primary, fontWeight: '500' },
   navTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
-  navRight: { width: 80, alignItems: 'flex-end', justifyContent: 'center' },
+  navRightGroup: { width: 80, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 10 },
+  navArchiveBtn: { alignItems: 'center', justifyContent: 'center' },
+  newCustomerBtn: {
+    backgroundColor: colors.primary,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   searchWrap: {
     flexDirection: 'row',

@@ -20,9 +20,7 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   getJobs, getCrews, getExpenses, getCustomers,
   importBackup, deleteJob, deleteExpense, saveJob, saveEmailConfig,
-  getTwilioConfig, saveTwilioConfig,
 } from '../services/db';
-import { invalidateSMSConfig, sendSMS, getTwilioConfig as getSMSConfig } from '../utils/sendSMS';
 import { useAppData } from '../context/AppDataContext';
 import { deleteStoragePhoto, jobPhotoPath, expensePhotoPath, testStorageConnection } from '../services/storageService';
 import { SkeletonCard } from '../components/SkeletonLoader';
@@ -483,6 +481,17 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        <Text style={styles.sectionLabel}>USER SETUP</Text>
+        <View style={styles.card}>
+          <TouchableOpacity style={styles.settingsRow} onPress={() => navigation.navigate('UserSetup')} activeOpacity={0.7}>
+            <View style={styles.settingsRowLeft}>
+              <Ionicons name="people-outline" size={20} color={colors.primary} />
+              <Text style={styles.settingsRowLabel}>Office Team &amp; Reminders</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+
         {user?.email === 'coachward4fun@gmail.com' && (
           <>
             <Text style={styles.sectionLabel}>EMAIL CONFIGURATION</Text>
@@ -491,11 +500,6 @@ export default function SettingsScreen() {
                 emailConfig={emailConfig}
                 onSaved={refreshEmailConfig}
               />
-            </View>
-
-            <Text style={styles.sectionLabel}>SMS CONFIGURATION</Text>
-            <View style={styles.card}>
-              <SMSConfigSection />
             </View>
           </>
         )}
@@ -779,181 +783,6 @@ function DataRow({ icon, label, value, size, divider, onPress }) {
   );
 }
 
-
-function SMSConfigSection() {
-  const [accountSid,  setAccountSid]  = useState('');
-  const [authToken,   setAuthToken]   = useState('');
-  const [tokenLocked, setTokenLocked] = useState(true);
-  const [fromNumber,  setFromNumber]  = useState('');
-  const [saving,      setSaving]      = useState(false);
-  const [loaded,      setLoaded]      = useState(false);
-  const [testing,     setTesting]     = useState(false);
-  const [testResult,  setTestResult]  = useState(null);
-
-  useEffect(() => {
-    getTwilioConfig().then((cfg) => {
-      if (cfg) {
-        setAccountSid(cfg.accountSid || '');
-        setFromNumber(cfg.fromNumber || '');
-        // authToken intentionally not pre-filled
-      }
-      setLoaded(true);
-    }).catch(() => setLoaded(true));
-  }, []);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const updates = {
-        accountSid: accountSid.trim(),
-        fromNumber: fromNumber.trim(),
-      };
-      if (!tokenLocked && authToken.trim()) {
-        updates.authToken = authToken.trim();
-      }
-      await saveTwilioConfig(updates);
-      invalidateSMSConfig();
-      setAuthToken('');
-      setTokenLocked(true);
-      setTestResult(null);
-      Alert.alert('Saved', 'SMS configuration updated.');
-    } catch (err) {
-      Alert.alert('Error', err.message || 'Could not save SMS configuration.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleTestSMS = async () => {
-    setTesting(true);
-    setTestResult(null);
-    invalidateSMSConfig();
-
-    const toNumber = '+14023123535';
-    const message  = 'Apollonia Test SMS - if you receive this, SMS is working!';
-
-    // Log config before sending so we can see what's loaded
-    const config = await getSMSConfig();
-    console.log('Twilio config loaded:', config ? 'yes' : 'no');
-    console.log('AccountSid:', config?.accountSid?.substring(0, 10));
-    console.log('FromNumber:', config?.fromNumber);
-
-    const result = await sendSMS(toNumber, message);
-
-    setTestResult({ ok: result.success });
-
-    if (result.success) {
-      logActivity('sms_test_sent', `Test SMS sent successfully - SID: ${result.sid} - To: ${toNumber}`);
-      Alert.alert(
-        '✅ SMS Sent!',
-        `SID: ${result.sid}\nTo: ${toNumber}`,
-        [{ text: 'OK' }]
-      );
-    } else {
-      logActivity('sms_test_failed', `Test SMS FAILED - Error: ${result.error}`);
-      Alert.alert(
-        '❌ SMS Failed',
-        String(result.error),
-        [{ text: 'OK' }]
-      );
-    }
-
-    setTesting(false);
-  };
-
-  if (!loaded) return <ActivityIndicator color={colors.primary} style={{ padding: 12 }} />;
-
-  return (
-    <View>
-      <ConfigField label="Account SID" value={accountSid} onChangeText={setAccountSid} placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" autoCapitalize="none" />
-      <View style={styles.configDivider} />
-      <View style={styles.configField}>
-        <Text style={styles.configFieldLabel}>Auth Token</Text>
-        <View style={styles.appPasswordRow}>
-          <TextInput
-            style={[styles.configFieldInput, { flex: 1 }]}
-            value={tokenLocked ? '••••••••••••••••' : authToken}
-            onChangeText={tokenLocked ? undefined : setAuthToken}
-            placeholder={tokenLocked ? '' : 'leave blank to keep existing'}
-            placeholderTextColor={colors.textMuted}
-            secureTextEntry={!tokenLocked}
-            editable={!tokenLocked}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <TouchableOpacity
-            onPress={() => {
-              if (tokenLocked) {
-                Alert.alert(
-                  'Edit Auth Token',
-                  'Warning: Changes to this field will impact SMS delivery. Are you sure you want to edit this?',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Unlock', onPress: () => { setTokenLocked(false); setAuthToken(''); } },
-                  ]
-                );
-              } else {
-                setTokenLocked(true);
-                setAuthToken('');
-              }
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Ionicons
-              name={tokenLocked ? 'lock-closed' : 'lock-open'}
-              size={18}
-              color={tokenLocked ? colors.textMuted : colors.primary}
-            />
-          </TouchableOpacity>
-        </View>
-      </View>
-      <View style={styles.configDivider} />
-      <ConfigField label="From Number" value={fromNumber} onChangeText={setFromNumber} placeholder="+18005551234" autoCapitalize="none" keyboardType="phone-pad" />
-
-      <View style={styles.smsTrialNote}>
-        <Ionicons name="information-circle-outline" size={14} color={colors.textMuted} />
-        <Text style={styles.smsTrialText}>
-          Trial mode: SMS only sends to verified numbers. Upgrade your Twilio account to send to all numbers.
-        </Text>
-      </View>
-
-      <TouchableOpacity
-        style={[styles.saveConfigButton, saving && { opacity: 0.6 }]}
-        onPress={handleSave}
-        disabled={saving}
-        activeOpacity={0.7}
-      >
-        {saving
-          ? <ActivityIndicator color="#fff" size="small" />
-          : <Text style={styles.saveConfigButtonText}>Save SMS Config</Text>
-        }
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        style={[styles.testSmsButton, testing && { opacity: 0.6 }]}
-        onPress={handleTestSMS}
-        disabled={testing}
-        activeOpacity={0.7}
-      >
-        {testing
-          ? <ActivityIndicator color={colors.primary} size="small" />
-          : (
-            <>
-              <Ionicons name="send-outline" size={15} color={colors.primary} />
-              <Text style={styles.testSmsButtonText}>Send Test SMS to 402-312-3535</Text>
-            </>
-          )
-        }
-      </TouchableOpacity>
-
-      {testResult && (
-        <Text style={[styles.smsTestStatus, { color: testResult.ok ? '#16a34a' : '#dc2626' }]}>
-          {testResult.ok ? '✅ Test sent — check your phone' : '❌ Test failed — see alert for details'}
-        </Text>
-      )}
-    </View>
-  );
-}
 
 function EmailConfigSection({ emailConfig, onSaved }) {
   const [fromEmail,      setFromEmail]      = useState('');
@@ -1276,8 +1105,6 @@ const styles = StyleSheet.create({
 
   configField: { paddingVertical: 10 },
   appPasswordRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  smsTrialNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 12, marginBottom: 4 },
-  smsTrialText: { flex: 1, fontSize: 12, color: colors.textMuted, lineHeight: 17 },
   configFieldLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 6 },
   configFieldInput: {
     backgroundColor: '#f9fafb',
@@ -1290,19 +1117,6 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
   },
   configDivider: { height: 1, backgroundColor: '#f3f4f6' },
-  testSmsButton: {
-    borderWidth: 1,
-    borderColor: colors.primary,
-    borderRadius: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    paddingVertical: 12,
-    marginTop: 10,
-  },
-  testSmsButtonText: { color: colors.primary, fontSize: 14, fontWeight: '600' },
-  smsTestStatus: { fontSize: 12, fontWeight: '600', textAlign: 'center', marginTop: 8 },
   saveConfigButton: {
     backgroundColor: colors.primary,
     borderRadius: 10,
