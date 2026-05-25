@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { subscribeCustomers, subscribeJobs, getCustomers, getJobs, saveCustomer, unarchiveCustomer } from '../services/db';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
+import { formatPhoneDisplay } from '../utils/phoneUtils';
 
 const PREDEFINED = ['Sam Ward', 'Kathleen Ward', 'Shamrock Roofing Nebraska'];
 
@@ -221,6 +222,12 @@ export default function CustomerListScreen() {
                   <View style={styles.metaRow}>
                     <Ionicons name="mail-outline" size={12} color={colors.textMuted} />
                     <Text style={styles.metaText} numberOfLines={1}>{c.email}</Text>
+                  </View>
+                ) : null}
+                {c.phone ? (
+                  <View style={styles.metaRow}>
+                    <Ionicons name="call-outline" size={12} color={colors.textMuted} />
+                    <Text style={styles.metaText} numberOfLines={1}>{formatPhoneDisplay(c.phone)}</Text>
                   </View>
                 ) : null}
                 {c.salesperson ? (

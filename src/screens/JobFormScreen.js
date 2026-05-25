@@ -5,7 +5,7 @@ import {
   Alert, ActivityIndicator, Modal, useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { getJobs, saveJob, deleteJob, assignJobId, getJobTypes, getExpenses, saveCustomer } from '../services/db';
+import { getJobs, saveJob, deleteJob, assignJobId, getJobTypes, getExpenses, saveExpense, saveCustomer } from '../services/db';
 import { useAppData } from '../context/AppDataContext';
 import { uploadJobPhoto, deleteStoragePhoto, storagePathFromUrl } from '../services/storageService';
 import * as ImagePicker from 'expo-image-picker';
@@ -104,6 +104,7 @@ export default function JobFormScreen() {
   const [billToName,         setBillToName]         = useState('');
   const [billToAddress,      setBillToAddress]      = useState('');
   const [email,              setEmail]              = useState('');
+  const [phone,              setPhone]              = useState('');
   const [jobLocationAddress, setJobLocationAddress] = useState('');
   const [crewId,             setCrewId]             = useState('');
   const [salesperson,        setSalesperson]        = useState('');
@@ -145,6 +146,12 @@ export default function JobFormScreen() {
   const [showCustomerPicker, setShowCustomerPicker] = useState(false);
   const [customerSearch,     setCustomerSearch]     = useState('');
   const [isNewCustomer,      setIsNewCustomer]      = useState(false);
+  // Each-job recurring expense picker — shown on first save when matching
+  // company-recurring expenses exist. User selects which to copy onto this job.
+  const [showRecurringPicker,  setShowRecurringPicker]  = useState(false);
+  const [recurringCandidates,  setRecurringCandidates]  = useState([]);
+  const [selectedRecurringIds, setSelectedRecurringIds] = useState(() => new Set());
+  const [pendingNavInfo,       setPendingNavInfo]       = useState(null);
 
   useEffect(() => {
     async function loadData() {
@@ -162,6 +169,7 @@ export default function JobFormScreen() {
             setBillToName(job.billToName || '');
             setBillToAddress(job.billToAddress || '');
             setEmail(job.email || '');
+            setPhone(job.phone || '');
             setJobLocationAddress(job.jobLocationAddress || '');
             setCrewId(job.crewId || '');
             setSalesperson(job.salesperson || '');
@@ -206,6 +214,7 @@ export default function JobFormScreen() {
           }
           if (prefill.billToAddress)      setBillToAddress(prefill.billToAddress);
           if (prefill.email)              setEmail(prefill.email);
+          if (prefill.phone)              setPhone(prefill.phone);
           if (prefill.jobType)            setJobType(prefill.jobType);
           if (prefill.jobLocationAddress) setJobLocationAddress(prefill.jobLocationAddress);
           if (prefill.targetDate)         setTargetDate(prefill.targetDate);
@@ -228,7 +237,7 @@ export default function JobFormScreen() {
     for (const j of contextActiveJobs) {
       const n = j.billToName?.trim();
       if (n && !map[n]) {
-        map[n] = { id: n, name: n, address: j.billToAddress || '', email: j.email || '', salesperson: j.salesperson || '' };
+        map[n] = { id: n, name: n, address: j.billToAddress || '', email: j.email || '', phone: j.phone || '', salesperson: j.salesperson || '' };
       }
     }
     return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
@@ -356,13 +365,40 @@ export default function JobFormScreen() {
     ]);
   }, []);
 
+  // Back-fill empty contact fields on an EXISTING job from the customer
+  // profile. Older jobs were created before some fields (phone, email) lived
+  // on the customer doc, so reopening the form should hydrate any missing
+  // values without ever overwriting what the job already has.
+  const backFilledForRef = useRef(null);
+  useEffect(() => {
+    if (!isEdit) return;
+    if (!billToName) return;
+    if (backFilledForRef.current === billToName) return;
+    const customer = contextCustomers.find(
+      (c) => !c.archived && c.name?.toLowerCase() === billToName.toLowerCase(),
+    );
+    if (!customer) return;
+    backFilledForRef.current = billToName;
+    if (!billToAddress && customer.address)     setBillToAddress(customer.address);
+    if (!email        && customer.email)        setEmail(customer.email);
+    if (!phone        && customer.phone)        setPhone(customer.phone);
+    if (!salesperson  && customer.salesperson)  setSalesperson(customer.salesperson);
+  }, [isEdit, billToName, contextCustomers, billToAddress, email, phone, salesperson]);
+
   // Clearing the target date while status is "Scheduled" violates the business
   // rule that Scheduled requires a date — auto-downgrade to "Not Scheduled" so
   // the form stays in a consistent state without waiting for the save guard.
+  // Inverse: setting a target date while status is "" or "Not Scheduled"
+  // auto-upgrades to "Scheduled" (matches what the form does on initial save).
   const handleTargetDateChange = useCallback((next) => {
+    const trimmed = String(next || '').trim();
     setTargetDate(next || '');
-    if (!String(next || '').trim() && status === 'Scheduled') {
+    if (!trimmed && status === 'Scheduled') {
       setStatus('Not Scheduled');
+      return;
+    }
+    if (trimmed && (!status || status === 'Not Scheduled')) {
+      setStatus('Scheduled');
     }
   }, [status]);
 
@@ -378,6 +414,15 @@ export default function JobFormScreen() {
     if (status === 'Scheduled' && !targetDate.trim()) {
       Alert.alert('Target Date Required', 'A target date is required for Scheduled status. Set a target date or change the status.');
       return;
+    }
+    if (status === 'In Progress') {
+      const td = targetDate.trim();
+      const d  = new Date();
+      const todayStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (!td || td > todayStr) {
+        Alert.alert('Invalid Date', 'In Progress jobs must have a target date that is today or earlier.');
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -421,6 +466,7 @@ export default function JobFormScreen() {
         billToName:         billToName.trim(),
         billToAddress:      billToAddress.trim(),
         email:              email.trim(),
+        phone:              phone.trim(),
         jobLocationAddress: jobLocationAddress.trim(),
         crewId:             crewId || '',
         salesperson:        salesperson.trim(),
@@ -451,6 +497,7 @@ export default function JobFormScreen() {
           name:        billToName.trim(),
           address:     billToAddress.trim(),
           email:       email.trim(),
+          phone:       phone.trim(),
           salesperson: salesperson.trim(),
           updatedAt:   new Date().toISOString(),
         }).catch((err) => console.warn('[JobForm] saveCustomer failed:', err.message));
@@ -465,31 +512,109 @@ export default function JobFormScreen() {
         originalStatusRef.current = 'Invoice Paid';
       }
 
-      // Delete any Storage photos the user explicitly removed
-      for (const url of removedUrls) {
-        const path = storagePathFromUrl(url);
-        if (path) deleteStoragePhoto(path).catch(() => {});
+      // First-time save → check for "Each Job" recurring company expenses.
+      // If any exist, hand off to the picker modal; the modal's Confirm/Skip
+      // path will run the photo cleanup + navigation tail.
+      if (!isEdit) {
+        try {
+          const allExp = await getExpenses();
+          const candidates = allExp.filter(
+            (e) => e.recurring === true && e.recurringFrequency === 'each_job',
+          );
+          if (candidates.length > 0) {
+            setRecurringCandidates(candidates);
+            setSelectedRecurringIds(new Set(candidates.map((e) => e.id)));
+            setPendingNavInfo({ id, returnTo });
+            setShowRecurringPicker(true);
+            return; // bail out — modal will finalize
+          }
+        } catch (err) {
+          console.warn('[JobForm] recurring-expense lookup failed:', err.message);
+        }
       }
-      setRemovedUrls([]);
 
-      if (returnTo === 'invoiceDetails' || returnTo === 'invoicePreview') {
-        navigation.goBack();
-        InteractionManager.runAfterInteractions(() => {
-          navigationRef.navigate('Invoice', { preselectedJobId: id });
-        });
-      } else {
-        setToast('Job saved');
-        setTimeout(() => {
-          setToast('');
-          navigation.goBack();
-        }, 700);
-      }
+      finalizeAfterSave(id, returnTo);
     } catch (err) {
       Alert.alert('Error', err.message || 'Could not save job.');
     } finally {
       setSaving(false);
     }
   };
+
+  // Photo cleanup + navigation tail shared by direct-save path and the
+  // recurring-expense picker's Confirm / Skip paths.
+  const finalizeAfterSave = useCallback((id, returnTo) => {
+    for (const url of removedUrls) {
+      const path = storagePathFromUrl(url);
+      if (path) deleteStoragePhoto(path).catch(() => {});
+    }
+    setRemovedUrls([]);
+
+    if (returnTo === 'invoiceDetails' || returnTo === 'invoicePreview') {
+      navigation.goBack();
+      InteractionManager.runAfterInteractions(() => {
+        navigationRef.navigate('Invoice', { preselectedJobId: id });
+      });
+    } else {
+      setToast('Job saved');
+      setTimeout(() => {
+        setToast('');
+        navigation.goBack();
+      }, 700);
+    }
+  }, [removedUrls, navigation]);
+
+  const toggleRecurringSelection = useCallback((expenseId) => {
+    setSelectedRecurringIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(expenseId)) next.delete(expenseId);
+      else next.add(expenseId);
+      return next;
+    });
+  }, []);
+
+  const handleConfirmRecurring = useCallback(async () => {
+    if (!pendingNavInfo) return;
+    const { id: newJobId, returnTo } = pendingNavInfo;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    for (const parent of recurringCandidates) {
+      if (!selectedRecurringIds.has(parent.id)) continue;
+      try {
+        const childId = `exp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        await saveExpense({
+          id:                childId,
+          type:              'job',
+          jobId:             newJobId,
+          jobName:           projectName.trim() || '',
+          date:              todayIso,
+          amount:            Number(parent.amount) || 0,
+          description:       parent.description || '',
+          category:          parent.category || 'Other',
+          addToInvoice:      false,
+          isCrewCost:        false,
+          recurring:         false,
+          recurringParentId: parent.id,
+        });
+      } catch (err) {
+        console.warn('[JobForm] saveExpense (recurring child) failed:', err.message);
+      }
+    }
+    setShowRecurringPicker(false);
+    setRecurringCandidates([]);
+    setSelectedRecurringIds(new Set());
+    setPendingNavInfo(null);
+    finalizeAfterSave(newJobId, returnTo);
+  }, [pendingNavInfo, recurringCandidates, selectedRecurringIds, projectName, finalizeAfterSave]);
+
+  const handleSkipRecurring = useCallback(() => {
+    if (!pendingNavInfo) return;
+    const { id: newJobId, returnTo } = pendingNavInfo;
+    setShowRecurringPicker(false);
+    setRecurringCandidates([]);
+    setSelectedRecurringIds(new Set());
+    setPendingNavInfo(null);
+    finalizeAfterSave(newJobId, returnTo);
+  }, [pendingNavInfo, finalizeAfterSave]);
 
   const handleDelete = () => {
     if (!canWrite('jobs')) {
@@ -779,7 +904,7 @@ export default function JobFormScreen() {
             </Text>
             {billToName && !isNewCustomer ? (
               <TouchableOpacity
-                onPress={() => { setBillToName(''); setBillToAddress(''); setEmail(''); setSalesperson(''); setIsNewCustomer(false); }}
+                onPress={() => { setBillToName(''); setBillToAddress(''); setEmail(''); setPhone(''); setSalesperson(''); setIsNewCustomer(false); }}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
                 <Ionicons name="close-circle" size={18} color={colors.textMuted} />
@@ -815,6 +940,11 @@ export default function JobFormScreen() {
                 <TextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="customer@example.com" placeholderTextColor={colors.textMuted} keyboardType="email-address" autoCapitalize="none" returnKeyType="next" />
               </View>
             </View>
+          </View>
+
+          <FormLabel text="CUSTOMER PHONE" />
+          <View style={styles.inputCard}>
+            <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
           </View>
 
           <FormLabel text="JOB LOCATION ADDRESS" />
@@ -1000,7 +1130,13 @@ export default function JobFormScreen() {
                   setBillToName(c.name);
                   setBillToAddress(c.address || '');
                   setEmail(c.email || '');
+                  setPhone(c.phone || '');
                   setSalesperson(c.salesperson || '');
+                  // Default job location to the customer's address — only when
+                  // the user hasn't already typed a different site address.
+                  if (!jobLocationAddress.trim() && c.address) {
+                    setJobLocationAddress(c.address);
+                  }
                   setCustomerSearch('');
                   setShowCustomerPicker(false);
                 }}
@@ -1018,6 +1154,7 @@ export default function JobFormScreen() {
                   setBillToName(customerSearch.trim());
                   setBillToAddress('');
                   setEmail('');
+                  setPhone('');
                   setSalesperson('');
                   setCustomerSearch('');
                   setShowCustomerPicker(false);
@@ -1205,6 +1342,64 @@ export default function JobFormScreen() {
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}
+
+      {/* Each-job recurring expense picker — shown after first save of a new job
+          when matching company-recurring expenses exist. */}
+      <Modal
+        visible={showRecurringPicker}
+        transparent
+        animationType="fade"
+        onRequestClose={handleSkipRecurring}
+      >
+        <View style={styles.recurringBackdrop}>
+          <View style={styles.recurringSheet}>
+            <Text style={styles.recurringTitle}>Add recurring expenses?</Text>
+            <Text style={styles.recurringSub}>
+              Select which recurring expenses to attach to this job. Each becomes a job expense (not billed to the customer).
+            </Text>
+            <ScrollView style={styles.recurringList} showsVerticalScrollIndicator={false}>
+              {recurringCandidates.map((exp) => {
+                const checked = selectedRecurringIds.has(exp.id);
+                return (
+                  <TouchableOpacity
+                    key={exp.id}
+                    style={styles.recurringRow}
+                    onPress={() => toggleRecurringSelection(exp.id)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name={checked ? 'checkbox' : 'square-outline'}
+                      size={22}
+                      color={checked ? colors.primary : colors.textMuted}
+                    />
+                    <View style={{ flex: 1, marginLeft: 10 }}>
+                      <Text style={styles.recurringRowDesc} numberOfLines={1}>
+                        {exp.description || exp.category || 'Expense'}
+                      </Text>
+                      {exp.category ? (
+                        <Text style={styles.recurringRowSub} numberOfLines={1}>{exp.category}</Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.recurringRowAmount}>
+                      ${Math.round(Number(exp.amount) || 0).toLocaleString('en-US')}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.recurringBtnRow}>
+              <TouchableOpacity style={[styles.recurringBtn, styles.recurringBtnSkip]} onPress={handleSkipRecurring}>
+                <Text style={styles.recurringBtnSkipText}>Skip</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.recurringBtn, styles.recurringBtnConfirm]} onPress={handleConfirmRecurring}>
+                <Text style={styles.recurringBtnConfirmText}>
+                  Add {selectedRecurringIds.size} expense{selectedRecurringIds.size === 1 ? '' : 's'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1223,6 +1418,38 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2, shadowRadius: 6, elevation: 6,
   },
   toastText:  { color: '#fff', fontWeight: '700', fontSize: 15 },
+
+  // Each-job recurring expense picker
+  recurringBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center', alignItems: 'center', padding: 20,
+  },
+  recurringSheet: {
+    width: '100%', maxWidth: 420, maxHeight: '80%',
+    backgroundColor: '#fff', borderRadius: 16, padding: 18,
+  },
+  recurringTitle: { fontSize: 18, fontWeight: '800', color: '#111827', textAlign: 'center' },
+  recurringSub:   { fontSize: 13, color: '#6b7280', textAlign: 'center', marginTop: 6, marginBottom: 14, lineHeight: 18 },
+  recurringList:  { flexGrow: 0 },
+  recurringRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 10, paddingHorizontal: 10,
+    borderRadius: 10, marginBottom: 6,
+    backgroundColor: '#f9fafb',
+    borderWidth: 1, borderColor: '#e5e7eb',
+  },
+  recurringRowDesc:  { fontSize: 14, fontWeight: '600', color: '#111827' },
+  recurringRowSub:   { fontSize: 11, color: '#6b7280', marginTop: 2 },
+  recurringRowAmount:{ fontSize: 14, fontWeight: '700', color: '#111827', marginLeft: 8 },
+  recurringBtnRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  recurringBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  recurringBtnSkip:        { backgroundColor: '#f3f4f6' },
+  recurringBtnSkipText:    { fontSize: 14, fontWeight: '700', color: '#374151' },
+  recurringBtnConfirm:     { backgroundColor: colors.primary },
+  recurringBtnConfirmText: { fontSize: 14, fontWeight: '700', color: '#fff' },
 
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',

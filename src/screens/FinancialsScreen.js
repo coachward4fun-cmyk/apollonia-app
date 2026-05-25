@@ -33,10 +33,16 @@ function fmtK(n) {
 
 // ── YTD metrics ────────────────────────────────────────────────────────────────
 
+// endStr is optional. When omitted (e.g., for the YTD column), the upper
+// bound is dropped so jobs scheduled for later in the year still count as
+// paid revenue — matching the 3-month view, which only checks the year-month
+// prefix and never excludes future-dated work.
 function calcMetrics(jobs, expenses, startStr, endStr) {
   const periodJobs = jobs.filter((j) => {
     const date = j.targetDate || j.invoiceDate || '';
-    return date >= startStr && date <= endStr;
+    if (date < startStr) return false;
+    if (endStr && date > endStr) return false;
+    return true;
   });
 
   const paidJobs    = periodJobs.filter((j) => (j.status || '').toLowerCase() === 'invoice paid');
@@ -49,8 +55,15 @@ function calcMetrics(jobs, expenses, startStr, endStr) {
   const notPaid    = notPaidJobs.reduce((s, j) => s + (Number(j.invoiceTotal) || 0), 0);
 
   const periodExpenses = expenses.filter((e) => {
+    // Only company-cost expenses contribute to the net calculation. Job
+    // expenses flagged addToInvoice are billed back to the customer via the
+    // invoice line items, so they aren't an actual company expense.
+    const isCompanyCost = e.type === 'company' || (e.type === 'job' && e.addToInvoice !== true);
+    if (!isCompanyCost) return false;
     const date = e.date || '';
-    return date >= startStr && date <= endStr;
+    if (date < startStr) return false;
+    if (endStr && date > endStr) return false;
+    return true;
   });
   const totalExpenses = periodExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
 
@@ -72,7 +85,12 @@ function calcMetrics(jobs, expenses, startStr, endStr) {
 
 function buildMonthStats(jobs, expenses, monthKey) {
   const monthJobs = jobs.filter((j) => (j.targetDate || '').startsWith(monthKey));
-  const monthExp  = expenses.filter((e) => (e.date || '').startsWith(monthKey));
+  // Only company-cost expenses contribute — job expenses flagged addToInvoice
+  // are billed back to the customer, so they aren't an actual company expense.
+  const monthExp = expenses.filter((e) =>
+    (e.date || '').startsWith(monthKey) &&
+    (e.type === 'company' || (e.type === 'job' && e.addToInvoice !== true)),
+  );
 
   const totalJobs = monthJobs.length;
   const invoiced  = monthJobs
@@ -166,9 +184,10 @@ export default function FinancialsScreen() {
   const now      = new Date();
   const year     = now.getFullYear();
   const prevYear = year - 1;
-  const todayStr = localTodayStr();
 
-  const ytd  = calcMetrics(jobs, expenses, `${year}-01-01`,     todayStr);
+  // YTD: no upper bound — future-dated paid jobs within the current year
+  // still count, matching the 3-month view's behavior.
+  const ytd  = calcMetrics(jobs, expenses, `${year}-01-01`);
   const prev = calcMetrics(jobs, expenses, `${prevYear}-01-01`, `${prevYear}-12-31`);
 
   const THREE_MONTHS = [-2, -1, 0].map((offset) => {

@@ -290,3 +290,161 @@ exports.eveningCrewReminder = onSchedule(
     console.log(`[eveningCrewReminder] Sent ${messages.length} push(es) for ${Object.keys(byCrew).length} un-notified crew group(s).`);
   },
 );
+
+// ── Date helpers (DST-safe, Chicago) ─────────────────────────────────────────
+
+function getCentralDateStr(offset = 0) {
+  // Returns YYYY-MM-DD for today + offset days in America/Chicago.
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Chicago',
+    year:     'numeric',
+    month:    '2-digit',
+    day:      '2-digit',
+  });
+  const todayInChicago = fmt.format(new Date()); // "YYYY-MM-DD"
+  const [y, m, d] = todayInChicago.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + offset);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function addDaysStr(yyyymmddStr, days) {
+  const [y, m, d] = yyyymmddStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
+function addMonthsStr(yyyymmddStr, months) {
+  const [y, m, d] = yyyymmddStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCMonth(dt.getUTCMonth() + months);
+  return dt.toISOString().slice(0, 10);
+}
+
+// ── D) overdueInvoiceCheck — 9 AM Central daily ─────────────────────────────
+// Fires once when a job's dueDate is exactly yesterday and the invoice isn't
+// paid or cancelled. One push per notifiable user per overdue job.
+
+exports.overdueInvoiceCheck = onSchedule(
+  { schedule: '0 9 * * *', timeZone: 'America/Chicago', timeoutSeconds: 30, memory: '128MiB' },
+  async () => {
+    const yesterdayStr = getCentralDateStr(-1);
+    console.log('[overdueInvoiceCheck] Yesterday (CT):', yesterdayStr);
+
+    const jobsSnap = await db.collection('jobs').where('dueDate', '==', yesterdayStr).get();
+    const overdue = jobsSnap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return s !== 'invoice paid' && s !== 'cancelled';
+      });
+
+    if (overdue.length === 0) {
+      console.log('[overdueInvoiceCheck] No overdue invoices.');
+      return;
+    }
+
+    const users = await getNotifiableUsers();
+    if (users.length === 0) {
+      console.log('[overdueInvoiceCheck] No notifiable users.');
+      return;
+    }
+
+    const messages = [];
+    for (const job of overdue) {
+      const title = 'Invoice Overdue';
+      const body  = `${job.projectName || 'Untitled'} was due yesterday and has not been paid.`;
+      const data  = { type: 'invoice_overdue', jobId: job.id };
+      for (const u of users) {
+        messages.push({ to: u.pushToken, title, body, data, badge: overdue.length });
+      }
+      try {
+        await db.collection('activityLog').add({
+          action:    'overdue_invoice_alert',
+          details:   `Overdue alert sent for invoice #${job.invoiceNumber || '?'} — ${job.projectName || 'job'}${job.billToName ? ` (${job.billToName})` : ''}`,
+          timestamp: admin.firestore.Timestamp.now(),
+        });
+      } catch (err) {
+        console.warn('[overdueInvoiceCheck] activityLog write failed:', err.message);
+      }
+    }
+
+    await sendExpoPush(messages);
+    console.log(`[overdueInvoiceCheck] Sent ${messages.length} push(es) for ${overdue.length} overdue invoice(s).`);
+  },
+);
+
+// ── E) recurringExpenseCheck — 8 AM Central daily ───────────────────────────
+// For each expense with recurring === true (excluding 'each_job'), checks if
+// enough time has passed since the last creation (or the parent's date if
+// no child has ever been created) and creates a copy with today's date.
+// No push notifications.
+
+exports.recurringExpenseCheck = onSchedule(
+  { schedule: '0 8 * * *', timeZone: 'America/Chicago', timeoutSeconds: 60, memory: '256MiB' },
+  async () => {
+    const todayStr = getCentralDateStr(0);
+    console.log('[recurringExpenseCheck] Today (CT):', todayStr);
+
+    const snap = await db.collection('expenses').where('recurring', '==', true).get();
+    if (snap.empty) {
+      console.log('[recurringExpenseCheck] No recurring parents.');
+      return;
+    }
+
+    let created = 0;
+    for (const doc of snap.docs) {
+      const parent = doc.data();
+      const freq   = (parent.recurringFrequency || '').toLowerCase();
+
+      // each_job is handled inline in JobFormScreen — never auto-fires here.
+      if (freq === 'each_job' || !freq) continue;
+
+      const lastStr = parent.lastRecurringCreatedAt || parent.date;
+      if (!lastStr) {
+        console.warn('[recurringExpenseCheck] Parent has no anchor date — skipping:', doc.id);
+        continue;
+      }
+
+      let nextStr;
+      if      (freq === 'weekly')    nextStr = addDaysStr(lastStr, 7);
+      else if (freq === 'monthly')   nextStr = addMonthsStr(lastStr, 1);
+      else if (freq === 'quarterly') nextStr = addMonthsStr(lastStr, 3);
+      else if (freq === 'annually')  nextStr = addMonthsStr(lastStr, 12);
+      else continue;
+
+      if (todayStr < nextStr) continue;
+
+      // Build child — explicit field copy avoids passing through fields that
+      // shouldn't propagate (id, lastRecurringCreatedAt, recurring*, photos).
+      const childId = `exp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const child = {
+        id:           childId,
+        type:         parent.type || 'company',
+        date:         todayStr,
+        amount:       Number(parent.amount) || 0,
+        description:  parent.description || '',
+        category:     parent.category    || 'Other',
+        addToInvoice: false,
+        isCrewCost:   parent.isCrewCost === true,
+        recurring:    false,
+        recurringParentId: doc.id,
+      };
+
+      try {
+        await db.collection('expenses').doc(childId).set(child);
+        await doc.ref.update({ lastRecurringCreatedAt: todayStr });
+        created++;
+        console.log('[recurringExpenseCheck] Created child', childId, 'from', doc.id, `(${freq})`);
+      } catch (err) {
+        console.error('[recurringExpenseCheck] Failed for', doc.id, ':', err.message);
+      }
+    }
+
+    console.log(`[recurringExpenseCheck] Done — ${created} expense(s) auto-created.`);
+  },
+);

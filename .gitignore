@@ -46,3 +46,8 @@ functions/node_modules/
 # generated native folders
 /ios
 /android
+
+# Build artifacts — IPAs / APKs / AABs from EAS or local builds
+*.ipa
+*.apk
+*.aab

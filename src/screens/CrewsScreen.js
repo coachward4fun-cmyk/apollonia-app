@@ -47,7 +47,7 @@ export default function CrewsScreen() {
     const map = {};
     for (const crew of crews) {
       const paidJobs = jobs.filter(
-        (j) => j.crewId === crew.id && j.crewPaid === true && j.crewPaidAt,
+        (j) => j.crewId === crew.id && j.crewPaidAt,
       );
       map[crew.id] = paidJobs.length === 0
         ? null
@@ -132,7 +132,7 @@ export default function CrewsScreen() {
                       {paidThisWeek ? '✓ ' : ''}{formatShortDate(lastPaidAt)}
                     </Text>
                   ) : (
-                    <Text style={[styles.metaText, styles.paidRed]}>Not Paid for Last Week</Text>
+                    <Text style={[styles.metaText, styles.paidRed]}>Never Paid</Text>
                   )}
                 </View>
 

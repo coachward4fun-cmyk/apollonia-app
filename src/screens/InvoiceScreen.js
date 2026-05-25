@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, Modal, TextInput, KeyboardAvoidingView,
-  Platform, Alert, RefreshControl, ActivityIndicator,
+  Platform, Alert, RefreshControl, ActivityIndicator, Image,
 } from 'react-native';
 import DatePickerField from '../components/DatePickerField';
 import { sendInvoiceEmail } from '../utils/sendInvoiceEmail';
@@ -17,6 +17,7 @@ import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
 import { statusStyle } from '../theme/statusColors';
 import { openInMaps } from '../utils/openInMaps';
+import { formatPhoneDisplay } from '../utils/phoneUtils';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -117,9 +118,24 @@ export default function InvoiceScreen() {
     ? invoicedJobs.filter((j) => (j.status || '').toLowerCase() === 'invoice paid')
     : invoicedJobs;
 
-  const displayedJobs = statusFilter
-    ? modeFiltered.filter((j) => (j.status || '').toLowerCase() === statusFilter.toLowerCase())
-    : modeFiltered;
+  // 'pastDue' is a date-based filter, not a status — show invoices whose
+  // dueDate has passed and aren't yet paid or cancelled.
+  const isPastDueFilter = statusFilter === 'pastDue';
+  const todayStrLocal = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  })();
+
+  const displayedJobs = isPastDueFilter
+    ? modeFiltered.filter((j) => {
+        if (!j.dueDate) return false;
+        if (j.dueDate >= todayStrLocal) return false;
+        const s = (j.status || '').toLowerCase();
+        return s !== 'invoice paid' && s !== 'cancelled';
+      })
+    : statusFilter
+      ? modeFiltered.filter((j) => (j.status || '').toLowerCase() === statusFilter.toLowerCase())
+      : modeFiltered;
 
   const visibleJobs = displayedJobs.slice(0, invPage * 25);
   const hasMoreJobs = visibleJobs.length < displayedJobs.length;
@@ -130,6 +146,30 @@ export default function InvoiceScreen() {
     setSelectedJobId(jobId);
     setShowWizard(true);
   };
+
+  // Quick "Mark Paid" tap on an Invoice Sent card — confirms, writes, and lets
+  // the live jobs subscription refresh the badge + button visibility.
+  const handleMarkPaid = useCallback((job) => {
+    Alert.alert(
+      'Mark as Paid',
+      `Mark "${job.projectName || 'this invoice'}" as paid?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Mark Paid',
+          style: 'default',
+          onPress: async () => {
+            try {
+              await saveJob({ id: job.id, status: 'Invoice Paid' });
+              logActivity('invoice_paid', `Invoice paid — ${job.projectName || 'job'}${job.billToName ? ` (${job.billToName})` : ''}${job.jobId ? ` [${job.jobId}]` : ''}`);
+            } catch (err) {
+              Alert.alert('Error', err.message || 'Could not update invoice.');
+            }
+          },
+        },
+      ],
+    );
+  }, []);
 
   const handlePickerSelect = (job) => {
     setShowJobPicker(false);
@@ -182,7 +222,9 @@ export default function InvoiceScreen() {
         <View style={styles.filterBanner}>
           <Ionicons name="filter" size={13} color="#2563eb" />
           <Text style={styles.filterBannerText}>
-            Filtered: {statusFilter.replace(/\b\w/g, (c) => c.toUpperCase())}
+            Filtered: {statusFilter === 'pastDue'
+              ? 'Past Due'
+              : statusFilter.replace(/\b\w/g, (c) => c.toUpperCase())}
           </Text>
           <TouchableOpacity onPress={() => setStatusFilter(null)} style={styles.filterBannerClear}>
             <Ionicons name="close-circle" size={15} color="#6b7280" />
@@ -217,6 +259,7 @@ export default function InvoiceScreen() {
                 job={job}
                 crewName={crewMap[job.crewId] || null}
                 onEdit={() => handleEditJob(job.id)}
+                onMarkPaid={() => handleMarkPaid(job)}
               />
             ))}
             {hasMoreJobs && (
@@ -261,10 +304,11 @@ export default function InvoiceScreen() {
 
 // ── JobCard ────────────────────────────────────────────────────────────────────
 
-function JobCard({ job, crewName, onEdit }) {
-  const sc         = statusStyle(job.status);
-  const isInvoiced = job.invoiceTotal != null;
-  const hasPhotos  = Array.isArray(job.photos) && job.photos.length > 0;
+function JobCard({ job, crewName, onEdit, onMarkPaid }) {
+  const sc           = statusStyle(job.status);
+  const isInvoiced   = job.invoiceTotal != null;
+  const hasPhotos    = Array.isArray(job.photos) && job.photos.length > 0;
+  const isSent       = (job.status || '').toLowerCase() === 'invoice sent';
 
   return (
     <View style={styles.jobCard}>
@@ -300,6 +344,13 @@ function JobCard({ job, crewName, onEdit }) {
             #{job.invoiceNumber}  ·  {formatDate(job.invoiceDate)}  ·  {fmtWhole(job.invoiceTotal)}
           </Text>
         </View>
+      )}
+
+      {isSent && onMarkPaid && (
+        <TouchableOpacity style={styles.markPaidBtn} onPress={onMarkPaid} activeOpacity={0.85}>
+          <Ionicons name="checkmark-circle" size={16} color="#fff" />
+          <Text style={styles.markPaidBtnText}>Mark Paid</Text>
+        </TouchableOpacity>
       )}
     </View>
   );
@@ -982,16 +1033,35 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
             {step === 4 && selJob && (
               <>
                 <View style={styles.previewHeader}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.previewCompany}>{companyProfile?.companyName || '—'}</Text>
-                    {companyProfile?.address ? (
-                      <Text style={styles.previewCompanySub}>{companyProfile.address}</Text>
+                  <View style={styles.previewHeaderLeft}>
+                    {companyProfile?.logoUrl ? (
+                      <Image
+                        source={{ uri: companyProfile.logoUrl }}
+                        style={styles.previewHeaderLogo}
+                        resizeMode="contain"
+                      />
+                    ) : (
+                      <View style={{ paddingHorizontal: 6 }}>
+                        <Text style={styles.previewHeaderCompanyName} numberOfLines={1}>
+                          {companyProfile?.companyName || '—'}
+                        </Text>
+                        {companyProfile?.address ? (
+                          <Text style={styles.previewHeaderCompanyAddr} numberOfLines={1}>
+                            {companyProfile.address}
+                          </Text>
+                        ) : null}
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.previewHeaderCenter}>
+                    {companyProfile?.tagline ? (
+                      <Text style={styles.previewHeaderTagline} numberOfLines={2}>
+                        &ldquo;{companyProfile.tagline}&rdquo;
+                      </Text>
                     ) : null}
                   </View>
-                  <View style={{ marginRight: 28 }}>
-                    <View style={styles.previewInvoiceLabel}>
-                      <Text style={styles.previewInvoiceLabelText}>INVOICE</Text>
-                    </View>
+                  <View style={styles.previewHeaderRight}>
+                    <Text style={styles.previewHeaderInvoice}>INVOICE</Text>
                   </View>
                 </View>
 
@@ -1003,6 +1073,9 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                       <Text style={styles.previewMetaSub}>
                         {[selJob.billToAddress, selJob.email].filter(Boolean).join('  ')}
                       </Text>
+                    ) : null}
+                    {selJob.phone ? (
+                      <Text style={styles.previewMetaSub}>{formatPhoneDisplay(selJob.phone)}</Text>
                     ) : null}
                   </View>
                   <View style={styles.previewMetaRight}>
@@ -1345,6 +1418,18 @@ const styles = StyleSheet.create({
   jobCardCrew: { fontSize: 12, fontWeight: '600', marginBottom: 4 },
   invoiceSummaryRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
   invoiceSummaryText: { fontSize: 12, color: colors.textMuted },
+
+  markPaidBtn: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    paddingVertical: 9,
+  },
+  markPaidBtnText: { fontSize: 14, fontWeight: '700', color: '#fff' },
   editIconBtn: {
     marginLeft: 6,
     backgroundColor: '#f0fdf4',
@@ -1472,17 +1557,62 @@ const styles = StyleSheet.create({
   taxSummaryTotalLabel: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
   taxSummaryTotalValue: { fontSize: 17, fontWeight: '800', color: colors.primary },
 
+  // ── Invoice preview header — three sections matching PDF layout ─────────
+  // Left (white): logo or company fallback. Center (green): italic tagline.
+  // Right (white): "INVOICE" in dark green.
   previewHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: colors.primary, borderRadius: 12,
-    paddingHorizontal: 16, paddingVertical: 2, marginBottom: 8,
-    minHeight: 50,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    overflow: 'hidden',
+    marginBottom: 8,
+    height: 60,
   },
-  previewCompany: { fontSize: 12, fontWeight: '800', color: '#fff' },
-  previewQualityText: { fontSize: 11, fontWeight: '700', color: '#fff', textAlign: 'right' },
-  previewCompanySub: { fontSize: 12, color: '#bbf7d0', marginTop: 2 },
-  previewInvoiceLabel: { backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
-  previewInvoiceLabelText: { fontSize: 12, fontWeight: '800', color: '#fff', letterSpacing: 1 },
+  previewHeaderLeft: {
+    width: 100,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRightWidth: 1,
+    borderRightColor: 'rgba(255,255,255,0.3)',
+  },
+  previewHeaderLogo: { width: 90, height: 50 },
+  previewHeaderCompanyName: { fontSize: 11, fontWeight: '800', color: '#16a34a' },
+  previewHeaderCompanyAddr: { fontSize: 9,  color: '#374151', marginTop: 2 },
+  previewHeaderCenter: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderLeftWidth:  1,
+    borderLeftColor:  'rgba(255,255,255,0.3)',
+    borderRightWidth: 1,
+    borderRightColor: 'rgba(255,255,255,0.3)',
+  },
+  previewHeaderTagline: {
+    fontSize: 13,
+    fontWeight: '700',
+    fontStyle: 'italic',
+    color: '#fff',
+    textAlign: 'center',
+    lineHeight: 16,
+  },
+  previewHeaderRight: {
+    width: 90,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(255,255,255,0.3)',
+  },
+  previewHeaderInvoice: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#15803d',
+    letterSpacing: 2,
+  },
 
   previewPaymentCard: { backgroundColor: '#f0fdf4', borderRadius: 12, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: '#86efac' },
   previewMetaRow: {

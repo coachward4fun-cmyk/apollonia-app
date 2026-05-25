@@ -11,7 +11,8 @@ import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
 import { sendAIMessage, executeAction, extractFlowFields, VOICE_FLOWS } from '../services/aiService';
 import { isOnAdminTab, navigationRef } from '../utils/navigationRef';
-import { saveCustomer } from '../services/db';
+import { saveCustomer, saveJob } from '../services/db';
+import { logActivity } from '../services/activityLog';
 import {
   parseSmartJobIntent, resolveDayHint, matchCustomers, matchJobType,
   formatDateLabel, suggestCustomers,
@@ -84,6 +85,11 @@ export default function AIAssistantPanel() {
   // "anything else to add?" answer. handleSend intercepts the next message
   // when this ref is non-null, parses extra fields, then navigates.
   const smartCreateFollowupRef = useRef(null);
+  // Multi-step state for the fully-voice job-create chain (driving / hands-free).
+  // Shape: { customer, matchedType, targetDate, step, collected }.
+  // When set, handleSend routes each utterance through the conversational
+  // address → crew → notes chain and saves directly via saveJob — no form.
+  const voiceCreateStateRef = useRef(null);
 
   // Keep voiceFlowRef current so async callbacks see latest state
   useEffect(() => { voiceFlowRef.current = voiceFlow; }, [voiceFlow]);
@@ -120,6 +126,7 @@ export default function AIAssistantPanel() {
       lastTextRef.current = '';
       awaitingPendingConfirmationRef.current = false;
       smartCreateFollowupRef.current = null;
+      voiceCreateStateRef.current = null;
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -429,19 +436,91 @@ export default function AIAssistantPanel() {
     speakAndListen(opener, 'openended');
   }, [addMessage, speakAndListen]);
 
+  // Fully-voice job creation chain — no form, hands-free.
+  // Starts after a confident customer match in a voice session. The handleSend
+  // intercept walks the user through address → crew → notes, then calls
+  // saveJob directly. "done" / "cancel" / "skip" keywords short-circuit any step.
+  const startVoiceJobCreate = useCallback((customer, targetDate, matchedType) => {
+    voiceCreateStateRef.current = {
+      customer,
+      matchedType: matchedType || '',
+      targetDate:  targetDate  || '',
+      step:        'address',
+      // Default job-site address to the customer's bill-to address — saying
+      // "skip" at the address question naturally keeps this default.
+      collected:   { jobLocationAddress: customer?.address || '', crewId: '', notes: '' },
+    };
+    const typeStr = matchedType ? `${matchedType.toLowerCase()} job` : 'job';
+    const dateStr = targetDate  ? ` on ${formatDateLabel(targetDate)}` : '';
+    const opener  = `Got it — ${typeStr} for ${customer.name}${dateStr}. What's the job address?`;
+    addMessage({ role: 'assistant', content: opener });
+    speakAndListen(opener, 'openended');
+  }, [addMessage, speakAndListen]);
+
+  const finishVoiceJobCreate = useCallback(async (state) => {
+    voiceCreateStateRef.current = null;
+    const { customer, matchedType, targetDate, collected } = state;
+
+    const dateLabel = targetDate ? formatDateLabel(targetDate) : '';
+    const projectName = [customer.name, matchedType || 'Job', dateLabel].filter(Boolean).join(' - ');
+
+    addMessage({ role: 'assistant', content: 'Creating the job now.' });
+    speakText('Creating the job now.');
+
+    const job = {
+      id:                 `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      projectName,
+      jobType:            matchedType || '',
+      billToName:         customer.name,
+      billToAddress:      customer.address     || '',
+      email:              customer.email       || '',
+      phone:              customer.phone       || '',
+      salesperson:        customer.salesperson || '',
+      targetDate:         targetDate || '',
+      jobLocationAddress: collected.jobLocationAddress,
+      crewId:             collected.crewId,
+      notes:              collected.notes,
+      status:             targetDate ? 'Scheduled' : 'Not Scheduled',
+      createdAt:          new Date().toISOString(),
+    };
+
+    try {
+      await saveJob(job);
+      logActivity('ai_create_job_voice', `AI voice-created job: ${projectName}`);
+      const done = `Done. ${projectName} has been saved.`;
+      addMessage({ role: 'assistant', content: done });
+      speakText(done);
+      setTimeout(() => closePanel(), 1500);
+    } catch (err) {
+      const failMsg = `Couldn't save the job: ${err.message || 'unknown error'}`;
+      addMessage({ role: 'assistant', content: failMsg });
+      speakText(failMsg);
+      // Panel stays open on error so the user can retry or close manually.
+    }
+  }, [addMessage, speakText, closePanel]);
+
   const openJobFormWithCustomer = useCallback((customer, targetDate, jobType) => {
+    setCustomerPicker(null);
+    if (voiceSessionActive && customer) {
+      // Voice session with a confident customer match → conversational, no form.
+      startVoiceJobCreate(customer, targetDate, jobType);
+      return;
+    }
+    // Typed session OR voice without a customer match → existing form flow.
     const prefill = {
       billToName:         customer?.name        || '',
       billToAddress:      customer?.address     || '',
       email:              customer?.email       || '',
+      phone:              customer?.phone       || '',
       salesperson:        customer?.salesperson || '',
+      // Default job-site address to customer's bill-to. User can override in form.
+      jobLocationAddress: customer?.address     || '',
       targetDate:         targetDate            || '',
       jobType:            jobType               || '',
       isExistingCustomer: !!customer,
     };
-    setCustomerPicker(null);
     askForExtraDetailsAndNavigate(prefill);
-  }, [askForExtraDetailsAndNavigate]);
+  }, [askForExtraDetailsAndNavigate, voiceSessionActive, startVoiceJobCreate]);
 
   const handleSmartCreateJob = useCallback(async ({ typeHint, customer: customerHint, dayHint }) => {
     setIsProcessing(true);
@@ -556,6 +635,54 @@ export default function AIAssistantPanel() {
         return;
       }
       // Anything else → user changed topic; fall through and treat as a new turn.
+    }
+
+    // ── Voice job-create chain: address → crew → notes, then saveJob ────────
+    if (voiceCreateStateRef.current) {
+      const state = voiceCreateStateRef.current;
+
+      // Cancel — abort gracefully
+      if (/^(cancel|never\s*mind|forget\s+it|stop)\b/i.test(trimmed)) {
+        voiceCreateStateRef.current = null;
+        addMessage({ role: 'assistant', content: 'Okay, cancelled.' });
+        speakText('Okay, cancelled.');
+        return;
+      }
+
+      // Done — save with what we have
+      if (/^(done|that'?s\s+(all|it)|save\s+(it|now)|create\s+(it|now))\b/i.test(trimmed)) {
+        await finishVoiceJobCreate(state);
+        return;
+      }
+
+      // Per-step skip vs. capture
+      const isSkip = /^(skip|no|none|nothing|nope|nah)\.?\s*$/i.test(trimmed);
+
+      if (state.step === 'address') {
+        if (!isSkip) state.collected.jobLocationAddress = trimmed;
+        state.step = 'crew';
+        const q = 'Which crew?';
+        addMessage({ role: 'assistant', content: q });
+        speakAndListen(q, 'openended');
+        return;
+      }
+      if (state.step === 'crew') {
+        if (!isSkip) {
+          const cid = resolveCrewId(trimmed, crews);
+          if (cid) state.collected.crewId = cid;
+          // Unrecognized crew name → silently drop and continue.
+        }
+        state.step = 'notes';
+        const q = 'Any notes?';
+        addMessage({ role: 'assistant', content: q });
+        speakAndListen(q, 'openended');
+        return;
+      }
+      if (state.step === 'notes') {
+        if (!isSkip) state.collected.notes = trimmed;
+        await finishVoiceJobCreate(state);
+        return;
+      }
     }
 
     // ── Smart-create follow-up: user is answering "anything else to add?" ───
@@ -715,6 +842,7 @@ export default function AIAssistantPanel() {
     customerPicker, handleSmartCreateJob,
     activeJobs, crews, jobTypes,
     voiceSessionActive, localPending, navigateToJobFormWithPrefill,
+    finishVoiceJobCreate,
   ]);
 
   // Auto-submit voice transcript when panel opens

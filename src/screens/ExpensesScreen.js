@@ -392,13 +392,15 @@ function ExpenseRow({ expense, onDelete, onEdit }) {
 function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
   const isEdit = !!initialData;
 
-  const [type,          setType]          = useState('job');
+  const [type,          setType]          = useState('company');
   const [selectedJob,   setSelectedJob]   = useState(null);
   const [date,          setDate]          = useState(today());
   const [amount,        setAmount]        = useState('');
   const [description,   setDescription]   = useState('');
   const [category,      setCategory]      = useState('');
   const [addToInvoice,  setAddToInvoice]  = useState(false);
+  const [recurring,     setRecurring]     = useState(false);
+  const [recurringFrequency, setRecurringFrequency] = useState('monthly');
   const [photos,        setPhotos]        = useState([]);
   const [viewingPhoto,  setViewingPhoto]  = useState(null);
   const [showJobPicker, setShowJobPicker] = useState(false);
@@ -413,6 +415,8 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
       setDescription(initialData.description || '');
       setCategory(initialData.category || '');
       setAddToInvoice(initialData.addToInvoice || false);
+      setRecurring(initialData.recurring === true);
+      setRecurringFrequency(initialData.recurringFrequency || 'monthly');
       if (initialData.jobId && jobs.length > 0) {
         setSelectedJob(jobs.find((j) => j.id === initialData.jobId) || null);
       }
@@ -473,6 +477,11 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
       } : { jobId: undefined, jobName: undefined }),
       addToInvoice: type === 'job' ? addToInvoice : false,
       isCrewCost:   false,
+      // Recurring is only meaningful for company expenses. For job expenses we
+      // force it false so a misfire from a stale toggle can't accidentally
+      // schedule a job expense.
+      recurring:           type === 'company' ? recurring : false,
+      recurringFrequency:  type === 'company' && recurring ? recurringFrequency : '',
     };
 
     await onSave(data, photos);
@@ -643,6 +652,48 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
                   thumbColor={addToInvoice ? colors.primary : '#9ca3af'}
                 />
               </View>
+            )}
+
+            {type === 'company' && (
+              <>
+                <View style={styles.toggleRow}>
+                  <View style={styles.toggleLabelWrap}>
+                    <Ionicons name="repeat-outline" size={15} color={colors.textSecondary} />
+                    <Text style={styles.toggleLabel}>Recurring</Text>
+                  </View>
+                  <Switch
+                    value={recurring}
+                    onValueChange={setRecurring}
+                    trackColor={{ false: '#e5e7eb', true: '#86efac' }}
+                    thumbColor={recurring ? colors.primary : '#9ca3af'}
+                  />
+                </View>
+                {recurring && (
+                  <View style={styles.freqRow}>
+                    {[
+                      { key: 'each_job', label: 'Each Job' },
+                      { key: 'weekly',    label: 'Weekly' },
+                      { key: 'monthly',   label: 'Monthly' },
+                      { key: 'quarterly', label: 'Quarterly' },
+                      { key: 'annually',  label: 'Annually' },
+                    ].map((f) => {
+                      const isSelected = recurringFrequency === f.key;
+                      return (
+                        <TouchableOpacity
+                          key={f.key}
+                          style={[styles.freqChip, isSelected && styles.freqChipActive]}
+                          onPress={() => setRecurringFrequency(f.key)}
+                          activeOpacity={0.75}
+                        >
+                          <Text style={[styles.freqChipText, isSelected && styles.freqChipTextActive]}>
+                            {f.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+              </>
             )}
 
             <View style={styles.photosLabelRow}>
@@ -1007,6 +1058,25 @@ const styles = StyleSheet.create({
   },
   toggleLabelWrap: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   toggleLabel: { fontSize: 15, color: colors.textPrimary, fontWeight: '500' },
+
+  freqRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 4,
+  },
+  freqChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  freqChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  freqChipText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  freqChipTextActive: { color: '#fff' },
 
   photosLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6, marginHorizontal: 4 },
   photoCountLabel: { fontSize: 12, color: colors.textMuted, fontWeight: '600' },

@@ -5,6 +5,7 @@ import CustomerListScreen from '../screens/CustomerListScreen';
 import CustomerEditScreen from '../screens/CustomerEditScreen';
 import RevenueYTDScreen from '../screens/RevenueYTDScreen';
 import CrewPayYTDScreen from '../screens/CrewPayYTDScreen';
+import ExpensesYTDScreen from '../screens/ExpensesYTDScreen';
 import ActivityLogScreen from '../screens/ActivityLogScreen';
 import FinancialsScreen from '../screens/FinancialsScreen';
 import JobTypesScreen from '../screens/JobTypesScreen';
@@ -28,6 +29,7 @@ export default function SettingsNavigator() {
       <Stack.Screen name="CustomerEdit"  component={CustomerEditScreen} />
       <Stack.Screen name="RevenueYTD"    component={RevenueYTDScreen} />
       <Stack.Screen name="CrewPayYTD"    component={CrewPayYTDScreen} />
+      <Stack.Screen name="ExpensesYTD"   component={ExpensesYTDScreen} />
       <Stack.Screen name="ActivityLog"   component={ActivityLogScreen} />
       <Stack.Screen name="Financials"    component={FinancialsScreen} />
       <Stack.Screen name="JobTypes"        component={JobTypesScreen} />

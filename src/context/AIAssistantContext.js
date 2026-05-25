@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import * as Speech from 'expo-speech';
+import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const VOICE_KEY = 'apollonia:ai_voice_enabled';
@@ -91,14 +92,31 @@ export function AIAssistantProvider({ children }) {
 
   // ── TTS — accepts optional onDone callback ────────────────────────────────────
 
-  const speakText = useCallback((text, { onDone } = {}) => {
+  const speakText = useCallback(async (text, { onDone } = {}) => {
+    console.log('[Speech] speakText called — voiceEnabledRef:', voiceEnabledRef.current, 'voiceSessionRef:', voiceSessionRef.current, 'text:', (text || '').slice(0, 60));
     // Voice-session override: when the user entered via the mic tap, TTS is on
     // for the whole session regardless of the persisted voiceEnabled toggle.
     if (!voiceEnabledRef.current && !voiceSessionRef.current) {
       // Voice off — skip TTS but fire onDone so speakAndListen can still open the mic.
+      console.log('[Speech] gate short-circuited — TTS skipped');
       onDone?.();
       return;
     }
+
+    // iOS audio-session reset: speech recognition (mic) puts the AVAudioSession
+    // into record-only mode. Without flipping it back, expo-speech calls
+    // succeed silently — no audible output. Setting playback mode here means
+    // every TTS call starts with a clean playback-capable session.
+    try {
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS:     true,
+        allowsRecordingIOS:       false,
+        staysActiveInBackground:  false,
+      });
+    } catch (e) {
+      console.warn('[Speech] setAudioModeAsync failed:', e.message);
+    }
+
     console.log('[Speech] AI speaking started');
     Speech.stop();
     setIsSpeaking(true);

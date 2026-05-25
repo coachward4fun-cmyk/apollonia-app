@@ -91,6 +91,18 @@ function localDateStr(i) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Statuses that take a job out of the active pipeline. Used by the four
+// Pipeline boxes (Not Scheduled / Scheduled / Sched No Crew / Crews No Job) —
+// completed work doesn't represent upcoming labor or crew demand.
+const COMPLETED_STATUSES = new Set([
+  'invoice ready',
+  'invoice sent',
+  'invoice paid',
+  'cancelled',
+  'in progress',
+  'paid',
+]);
+
 function buildStats(jobs) {
   const total = jobs.length;
   let scheduled = 0;
@@ -107,6 +119,8 @@ function buildStats(jobs) {
   // Build the 7 date strings once using local time (no UTC parsing)
   const next7DateStrs = Array.from({ length: 7 }, (_, i) => localDateStr(i));
   const todayStr = next7DateStrs[0];
+  // 30-day window cutoff for the Invoice Paid box — local time to match the rest.
+  const thirtyDaysAgoStr = localDateStr(-30);
   const invoiceNeededExcluded = new Set(['cancelled', 'invoice paid', 'invoice sent', 'invoice ready']);
 
   for (const job of jobs) {
@@ -114,11 +128,15 @@ function buildStats(jobs) {
     const hasDate = !!(job.targetDate || job.scheduledDate);
     const hasCrew = !!job.crewId;
 
-    if (!hasDate || status === 'not scheduled') {
-      notScheduled++;
-    } else {
-      scheduled++;
-      if (!hasCrew) scheduledNoCrew++;
+    // Pipeline counters — only jobs in an active status (blank, "Unknown",
+    // "Not Scheduled", or "Scheduled") feed in. Completed states are skipped.
+    if (!COMPLETED_STATUSES.has(status)) {
+      if (!hasDate || status === 'not scheduled') {
+        notScheduled++;
+      } else {
+        scheduled++;
+        if (!hasCrew) scheduledNoCrew++;
+      }
     }
 
     // Next-7-day counts must match what JobsScreen shows when filtered by date:
@@ -135,7 +153,12 @@ function buildStats(jobs) {
     if (job.targetDate && job.targetDate <= todayStr && !invoiceNeededExcluded.has(status)) invoiceNeeded++;
     if (status === 'invoice ready') invoiceReady++;
     else if (status === 'invoice sent') invoiceSent++;
-    else if (status === 'invoice paid') invoicePaid++;
+    else if (status === 'invoice paid') {
+      // Only count jobs whose targetDate falls in the last 30 days.
+      if (job.targetDate && job.targetDate >= thirtyDaysAgoStr && job.targetDate <= todayStr) {
+        invoicePaid++;
+      }
+    }
   }
 
   return { total, scheduled, unassigned, notScheduled, scheduledNoCrew, invoiceNeeded, invoiceReady, invoiceSent, invoicePaid, next7, next7HasMissingCrew };
@@ -171,17 +194,14 @@ export default function DashboardScreen() {
   const scheduledWithCrew = stats.scheduled - stats.scheduledNoCrew;
 
   // Crews with no upcoming work — used by the 4th Pipeline box.
+  // "Busy" = assigned to a non-completed job with targetDate today-or-later.
   const crewsNoJob = useMemo(() => {
-    const tomorrowStr = (() => {
-      const d = new Date();
-      d.setDate(d.getDate() + 1);
-      return d.toISOString().slice(0, 10);
-    })();
+    const todayStr = localDateStr(0);
     const busyCrewIds = new Set(
       jobs
         .filter((j) =>
-          j.targetDate >= tomorrowStr &&
-          !['invoice paid', 'invoice sent'].includes((j.status || '').toLowerCase())
+          j.targetDate >= todayStr &&
+          !COMPLETED_STATUSES.has((j.status || '').toLowerCase())
         )
         .map((j) => j.crewId)
         .filter(Boolean)
@@ -189,11 +209,40 @@ export default function DashboardScreen() {
     return crews.filter((c) => !busyCrewIds.has(c.id)).length;
   }, [jobs, crews]);
 
+  // Past-due invoices — jobs whose dueDate has passed (strictly < today) and
+  // aren't paid or cancelled. Powers the dedicated Past Due box.
+  const pastDueCount = useMemo(() => {
+    const todayStr = localDateStr(0);
+    return jobs.filter((j) => {
+      if (!j.dueDate) return false;
+      if (j.dueDate >= todayStr) return false;
+      const s = (j.status || '').toLowerCase();
+      return s !== 'invoice paid' && s !== 'cancelled';
+    }).length;
+  }, [jobs]);
+
   const { weekStart, weekEnd, weekJobs, weekPaidJobs, weekUnpaidJobs, weekCrewCost, weekPaidCost, weekUnpaidCost } = useMemo(() => {
     const { start, end } = getPayWeekRange();
-    const all    = jobs.filter((j) => j.targetDate && j.targetDate >= start && j.targetDate <= end);
-    const paid   = all.filter((j) => j.crewPaidAt);
-    const unpaid = all.filter((j) => j.crewId && !j.crewPaidAt);
+    const todayStr = localDateStr(0);
+    // Jobs This Week / Crews Paid: scoped to the current Fri→Thu pay week,
+    // excluding cancelled work.
+    const all = jobs.filter((j) =>
+      j.targetDate &&
+      j.targetDate >= start &&
+      j.targetDate <= end &&
+      (j.status || '').toLowerCase() !== 'cancelled'
+    );
+    const paid = all.filter((j) => j.crewPaidAt);
+    // Crews to Pay: ALL past unpaid jobs with a crew assigned — including
+    // weeks before this pay window so overdue payroll stays visible. Future
+    // jobs are excluded since the work hasn't happened yet.
+    const unpaid = jobs.filter((j) =>
+      j.crewId &&
+      !j.crewPaidAt &&
+      j.targetDate &&
+      j.targetDate <= todayStr &&
+      (j.status || '').toLowerCase() !== 'cancelled'
+    );
     return {
       weekStart:    start,
       weekEnd:      end,
@@ -323,6 +372,28 @@ export default function DashboardScreen() {
           />
         </View>
 
+        {/* Past Due — its own row so the warning stands out */}
+        <TouchableOpacity
+          style={[styles.pastDueBox, pastDueCount === 0 && styles.pastDueBoxInactive]}
+          onPress={() => navigation.navigate('Invoice', { filter: 'pastDue' })}
+          activeOpacity={pastDueCount === 0 ? 1 : 0.72}
+          disabled={pastDueCount === 0}
+        >
+          <View style={styles.pastDueLeft}>
+            <Ionicons
+              name="alert-circle"
+              size={20}
+              color={pastDueCount === 0 ? colors.textMuted : '#dc2626'}
+            />
+            <Text style={[styles.pastDueLabel, pastDueCount === 0 && styles.pastDueLabelInactive]}>
+              Past Due
+            </Text>
+          </View>
+          <Text style={[styles.pastDueValue, pastDueCount === 0 && styles.pastDueValueInactive]}>
+            {pastDueCount}
+          </Text>
+        </TouchableOpacity>
+
         {/* Crew $ */}
         <SectionLabel title="Crew $" />
         <View style={styles.threeRow}>
@@ -385,6 +456,12 @@ export default function DashboardScreen() {
             icon="people-outline"
             label="Crew Pay YTD"
             onPress={() => navigation.navigate('Admin', { screen: 'CrewPayYTD' })}
+          />
+          <View style={styles.reportsDivider} />
+          <ReportRow
+            icon="wallet-outline"
+            label="Expenses YTD"
+            onPress={() => navigation.navigate('Admin', { screen: 'ExpensesYTD' })}
           />
           <View style={styles.reportsDivider} />
           <ReportRow
@@ -712,6 +789,29 @@ const styles = StyleSheet.create({
 
   threeRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
   fourRow:  { flexDirection: 'row', gap: 8,  marginBottom: 20 },
+
+  // Past Due banner — full-width row beneath the 4 invoicing boxes.
+  pastDueBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#fef2f2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 20,
+  },
+  pastDueBoxInactive: {
+    backgroundColor: '#f9fafb',
+    borderColor: '#e5e7eb',
+  },
+  pastDueLeft:  { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  pastDueLabel: { fontSize: 14, fontWeight: '700', color: '#991b1b', letterSpacing: 0.3 },
+  pastDueLabelInactive: { color: colors.textMuted },
+  pastDueValue: { fontSize: 22, fontWeight: '800', color: '#dc2626' },
+  pastDueValueInactive: { color: '#9ca3af' },
 
   pipelineBox: {
     flex: 1,

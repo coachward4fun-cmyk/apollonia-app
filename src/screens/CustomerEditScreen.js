@@ -10,6 +10,7 @@ import { getCustomers, saveCustomer, getJobs, archiveCustomer } from '../service
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import { normalizePhone, formatPhoneDisplay } from '../utils/phoneUtils';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -22,6 +23,7 @@ export default function CustomerEditScreen() {
   const [name,        setName]        = useState(customerName);
   const [address,     setAddress]     = useState('');
   const [email,       setEmail]       = useState('');
+  const [phone,       setPhone]       = useState('');
   const [salesperson, setSalesperson] = useState('');
   const [retail,      setRetail]      = useState(false);
   const [saving,      setSaving]      = useState(false);
@@ -47,6 +49,7 @@ export default function CustomerEditScreen() {
         if (saved && active) {
           if (saved.address)     setAddress(saved.address);
           if (saved.email)       setEmail(saved.email);
+          if (saved.phone)       setPhone(formatPhoneDisplay(saved.phone));
           if (saved.salesperson) setSalesperson(saved.salesperson);
           setRetail(saved.retail === true);
         }
@@ -107,6 +110,7 @@ export default function CustomerEditScreen() {
         name:        trimName,
         address:     address.trim(),
         email:       email.trim(),
+        phone:       normalizePhone(phone) || '',
         salesperson: salesperson.trim(),
         retail,
         updatedAt:   new Date().toISOString(),
@@ -160,6 +164,14 @@ export default function CustomerEditScreen() {
           onChange={setEmail}
           placeholder="customer@example.com"
           keyboardType="email-address"
+          autoCapitalize="none"
+        />
+        <Field
+          label="PHONE"
+          value={phone}
+          onChange={setPhone}
+          placeholder="555-123-4567"
+          keyboardType="phone-pad"
           autoCapitalize="none"
         />
         <Field label="SALESPERSON" value={salesperson} onChange={setSalesperson} placeholder="Salesperson name" />

@@ -4,6 +4,7 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { Asset } from 'expo-asset';
 import { logActivity } from '../services/activityLog';
 import { getCompanyProfile } from '../services/db';
+import { formatPhoneDisplay } from './phoneUtils';
 
 const SEND_EMAIL_URL = 'https://us-central1-apollonia-construction.cloudfunctions.net/sendInvoiceEmail';
 
@@ -152,19 +153,22 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   <!-- Invoice card — page 1 -->
   <div style="max-width:680px;margin:0 auto;background:#fff;">
 
-    <!-- Header (green bar) — logo flush left, tagline centered in the space to its right -->
-    <div style="background:#16a34a;padding:0;height:50px;">
-      <table style="width:100%;height:50px;border-collapse:collapse;"><tr>
-        <td style="vertical-align:middle;text-align:left;width:1px;white-space:nowrap;padding:0 8px 0 0;">
+    <!-- Header — three sections: logo (white), tagline (green), INVOICE (white) -->
+    <div style="background:#fff;height:60px;">
+      <table style="width:100%;height:60px;border-collapse:collapse;"><tr>
+        <td style="width:190px;background:#fff;vertical-align:middle;text-align:center;border-right:1px solid rgba(255,255,255,0.3);">
           ${logoSrc
-            ? `<img src="${logoSrc}" style="height:50px;max-width:200px;display:block;" alt="${companyName}" />`
-            : `<div style="padding:0 24px;"><div style="font-size:18px;font-weight:800;color:#fff;">${companyName}</div>${companyAddr ? `<div style="font-size:12px;color:#bbf7d0;margin-top:2px;">${companyAddr}</div>` : ''}</div>`
+            ? `<img src="${logoSrc}" style="height:50px;max-width:180px;display:block;margin:0 auto;" alt="${companyName}" />`
+            : `<div style="padding:0 12px;"><div style="font-size:16px;font-weight:800;color:#16a34a;">${companyName}</div>${companyAddr ? `<div style="font-size:11px;color:#374151;margin-top:2px;">${companyAddr}</div>` : ''}</div>`
           }
         </td>
-        <td style="vertical-align:middle;text-align:center;padding:0 24px;">
+        <td style="background:#16a34a;vertical-align:middle;text-align:center;padding:0 16px;border-left:1px solid rgba(255,255,255,0.3);border-right:1px solid rgba(255,255,255,0.3);">
           ${tagline
-            ? `<div style="font-size:22px;font-weight:800;font-style:italic;color:#fff;letter-spacing:0.3px;line-height:1.2;">&ldquo;${tagline}&rdquo;</div>`
+            ? `<div style="font-size:16px;font-weight:700;font-style:italic;color:#fff;letter-spacing:0.2px;line-height:1.2;">&ldquo;${tagline}&rdquo;</div>`
             : ''}
+        </td>
+        <td style="width:140px;background:#fff;vertical-align:middle;text-align:center;border-left:1px solid rgba(255,255,255,0.3);">
+          <div style="font-size:24px;font-weight:700;color:#15803d;letter-spacing:2px;">INVOICE</div>
         </td>
       </tr></table>
     </div>
@@ -180,6 +184,9 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
             <div style="font-size:15px;font-weight:700;color:#111827;">${job.billToName || ''}</div>
             ${(job.billToAddress || job.email)
               ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${[job.billToAddress, job.email].filter(Boolean).join('&nbsp;&nbsp;')}</div>`
+              : ''}
+            ${job.phone
+              ? `<div style="font-size:13px;color:#6b7280;margin-top:2px;">${formatPhoneDisplay(job.phone)}</div>`
               : ''}
           </td>
           <td style="vertical-align:top;text-align:right;">
