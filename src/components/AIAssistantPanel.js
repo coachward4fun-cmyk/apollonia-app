@@ -251,6 +251,45 @@ export default function AIAssistantPanel() {
     const crewId = resolveCrewId(data.crewName, crews);
 
     if (flowType === 'new_job') {
+      // Voice session — save directly so we don't interrupt the conversation
+      // with a form. Mirrors finishVoiceJobCreate's pattern.
+      if (voiceSessionActive) {
+        const targetDate = data.targetDate || '';
+        const projectName = [
+          data.billToName || 'Job',
+          data.jobType    || '',
+          targetDate      ? formatDateLabel(targetDate) : '',
+        ].filter(Boolean).join(' - ');
+        const job = {
+          id:                 `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          projectName,
+          jobType:            data.jobType            || '',
+          billToName:         data.billToName         || '',
+          jobLocationAddress: data.jobLocationAddress || '',
+          salesperson:        data.salesperson        || '',
+          crewId:             crewId                  || '',
+          targetDate,
+          status:             targetDate ? 'Scheduled' : 'Not Scheduled',
+          createdAt:          new Date().toISOString(),
+        };
+
+        cancelVoiceFlow();
+        try {
+          await saveJob(job);
+          logActivity('ai_create_job_voice', `AI voice-created job (legacy flow): ${projectName}`);
+          const done = `Done. ${projectName} has been saved.`;
+          addMessage({ role: 'assistant', content: done });
+          speakText(done);
+          setTimeout(() => closePanel(), 1500);
+        } catch (err) {
+          const failMsg = `Couldn't save the job: ${err.message || 'unknown error'}`;
+          addMessage({ role: 'assistant', content: failMsg });
+          speakText(failMsg);
+        }
+        return;
+      }
+
+      // Typed session — open form pre-filled so the user can review and save.
       const prefill = {
         billToName:         data.billToName  || '',
         jobType:            data.jobType     || '',
@@ -300,7 +339,7 @@ export default function AIAssistantPanel() {
       // The AI handled specific field updates via the normal flow
       cancelVoiceFlow();
     }
-  }, [crews, addMessage, speakText, cancelVoiceFlow, clearConversation, closePanel]);
+  }, [crews, addMessage, speakText, cancelVoiceFlow, clearConversation, closePanel, voiceSessionActive]);
 
   // ── Handle pausing the voice flow ────────────────────────────────────────────
   const handlePauseFlow = useCallback(() => {
@@ -315,8 +354,10 @@ export default function AIAssistantPanel() {
     const msg = `Voice flow paused at step ${voiceFlow.step + 1} of ${totalSteps}. You can continue filling the form manually, or tap the assistant again to resume.`;
     addMessage({ role: 'assistant', content: msg });
 
-    // For new_job: open the form with what we have so far so user can fill manually
-    if (voiceFlow.type === 'new_job') {
+    // For new_job in a TYPED session: open the form pre-filled with whatever
+    // was collected so the user can finish manually. In a VOICE session we
+    // never pop the form during the conversation — just close the panel.
+    if (voiceFlow.type === 'new_job' && !voiceSessionActive) {
       const crewId = resolveCrewId(voiceFlow.data.crewName, crews);
       const prefill = {
         billToName:         voiceFlow.data.billToName  || '',
@@ -335,7 +376,7 @@ export default function AIAssistantPanel() {
     } else {
       closePanel();
     }
-  }, [voiceFlow, pauseVoiceFlow, addMessage, crews, closePanel, stopSpeaking, stopAutoListen]);
+  }, [voiceFlow, pauseVoiceFlow, addMessage, crews, closePanel, stopSpeaking, stopAutoListen, voiceSessionActive]);
 
   // ── Handle resuming the voice flow ───────────────────────────────────────────
   const handleResumeFlow = useCallback(() => {

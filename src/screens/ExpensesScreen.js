@@ -409,7 +409,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
 
   React.useEffect(() => {
     if (visible && initialData) {
-      setType(initialData.type || 'job');
+      setType(initialData.type || 'company');
       setDate(initialData.date || today());
       setAmount(String(initialData.amount || ''));
       setDescription(initialData.description || '');
@@ -435,7 +435,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
   }, [visible, initialData]);
 
   const reset = () => {
-    setType('job');
+    setType('company');
     setSelectedJob(null);
     setDate(today());
     setAmount('');
@@ -692,6 +692,45 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
                       );
                     })}
                   </View>
+                )}
+                {/* Stop Recurring — only when editing an already-recurring expense. */}
+                {recurring && initialData?.recurring === true && (
+                  <TouchableOpacity
+                    style={styles.stopRecurringBtn}
+                    onPress={() => {
+                      Alert.alert(
+                        'Stop Recurring',
+                        'Stop recurring expense? No more auto-creates will happen.',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Stop',
+                            style: 'destructive',
+                            onPress: async () => {
+                              try {
+                                // Spread initialData so other fields aren't wiped — saveExpense uses
+                                // setDoc (no merge), so a partial object would replace the whole doc.
+                                await saveExpense({
+                                  ...initialData,
+                                  recurring:          false,
+                                  recurringFrequency: null,
+                                });
+                                setRecurring(false);
+                                setRecurringFrequency('monthly');
+                                Alert.alert('Stopped', 'This expense will no longer auto-create.');
+                              } catch (err) {
+                                Alert.alert('Error', err.message || 'Could not stop recurring.');
+                              }
+                            },
+                          },
+                        ],
+                      );
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="stop-circle-outline" size={16} color="#dc2626" />
+                    <Text style={styles.stopRecurringBtnText}>Stop Recurring</Text>
+                  </TouchableOpacity>
                 )}
               </>
             )}
@@ -1077,6 +1116,20 @@ const styles = StyleSheet.create({
   freqChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   freqChipText: { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
   freqChipTextActive: { color: '#fff' },
+
+  stopRecurringBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 10,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    backgroundColor: '#fef2f2',
+  },
+  stopRecurringBtnText: { fontSize: 14, fontWeight: '700', color: '#dc2626' },
 
   photosLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, marginBottom: 6, marginHorizontal: 4 },
   photoCountLabel: { fontSize: 12, color: colors.textMuted, fontWeight: '600' },

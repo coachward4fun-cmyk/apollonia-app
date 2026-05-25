@@ -223,7 +223,7 @@ export default function InvoiceScreen() {
           <Ionicons name="filter" size={13} color="#2563eb" />
           <Text style={styles.filterBannerText}>
             Filtered: {statusFilter === 'pastDue'
-              ? 'Past Due'
+              ? 'Past Due Invoices'
               : statusFilter.replace(/\b\w/g, (c) => c.toUpperCase())}
           </Text>
           <TouchableOpacity onPress={() => setStatusFilter(null)} style={styles.filterBannerClear}>

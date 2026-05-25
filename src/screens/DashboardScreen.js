@@ -255,8 +255,44 @@ export default function DashboardScreen() {
     };
   }, [jobs]);
 
+  // Per-crew breakdown of this pay week's jobs — total count, days with zero
+  // jobs, days with 2+ jobs. Only crews with ≥1 job this week appear.
+  const crewWeekStats = useMemo(() => {
+    if (!weekJobs.length || !crews.length) return [];
+    const crewNameById = Object.fromEntries(crews.map((c) => [c.id, c.name]));
+    const byCrew = {};
+    for (const j of weekJobs) {
+      if (!j.crewId) continue;
+      if (!byCrew[j.crewId]) byCrew[j.crewId] = [];
+      byCrew[j.crewId].push(j);
+    }
+    // Build the 7 pay-week date strings (Fri → Thu)
+    const start = weekStart;
+    const dateStrs = [];
+    for (let i = 0; i < 7; i++) {
+      const [y, m, d] = start.split('-').map(Number);
+      const dt = new Date(y, m - 1, d);
+      dt.setDate(dt.getDate() + i);
+      dateStrs.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`);
+    }
+    return Object.keys(byCrew).map((crewId) => {
+      const jobsForCrew = byCrew[crewId];
+      const countByDay = dateStrs.map((ds) => jobsForCrew.filter((j) => j.targetDate === ds).length);
+      return {
+        crewId,
+        crewName:      crewNameById[crewId] || 'Unknown Crew',
+        totalJobs:     jobsForCrew.length,
+        daysNoJobs:    countByDay.filter((c) => c === 0).length,
+        daysMultiJobs: countByDay.filter((c) => c >= 2).length,
+      };
+    }).sort((a, b) => b.totalJobs - a.totalJobs);
+  }, [weekJobs, crews, weekStart]);
+
   const navToJobs = (params) =>
     navigation.navigate('Jobs', { screen: 'JobsList', params });
+
+  const navToCrewWeek = (crewId) =>
+    navigation.navigate('Jobs', { screen: 'JobsList', params: { weekStart, weekEnd, crewId } });
 
   return (
     <SafeAreaView style={styles.container}>
@@ -386,13 +422,59 @@ export default function DashboardScreen() {
               color={pastDueCount === 0 ? colors.textMuted : '#dc2626'}
             />
             <Text style={[styles.pastDueLabel, pastDueCount === 0 && styles.pastDueLabelInactive]}>
-              Past Due
+              Past Due Invoices
             </Text>
           </View>
           <Text style={[styles.pastDueValue, pastDueCount === 0 && styles.pastDueValueInactive]}>
             {pastDueCount}
           </Text>
         </TouchableOpacity>
+
+        {/* Crew Jobs This Week — per-crew breakdown of jobs in the current Fri→Thu pay week */}
+        <SectionLabel title="Crew Jobs This Week" />
+        {crewWeekStats.length === 0 ? (
+          <View style={styles.crewWeekEmpty}>
+            <Text style={styles.crewWeekEmptyText}>No jobs scheduled this week</Text>
+          </View>
+        ) : (
+          <View style={{ marginBottom: 20 }}>
+            {crewWeekStats.map((c) => (
+              <View key={c.crewId} style={styles.crewWeekRow}>
+                <Text style={styles.crewWeekName} numberOfLines={1}>{c.crewName}</Text>
+                <View style={styles.crewWeekBoxes}>
+                  <TouchableOpacity
+                    style={[styles.crewWeekBox, styles.crewWeekBoxTotal]}
+                    onPress={() => navToCrewWeek(c.crewId)}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={[styles.crewWeekBoxValue, { color: colors.primary }]}>{c.totalJobs}</Text>
+                    <Text style={styles.crewWeekBoxLabel}>Total</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.crewWeekBox, c.daysNoJobs > 0 && styles.crewWeekBoxAlert]}
+                    onPress={() => navToCrewWeek(c.crewId)}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={[styles.crewWeekBoxValue, c.daysNoJobs > 0 && { color: '#d97706' }]}>
+                      {c.daysNoJobs}
+                    </Text>
+                    <Text style={styles.crewWeekBoxLabel}>Days No Jobs</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.crewWeekBox, c.daysMultiJobs > 0 && styles.crewWeekBoxWarn]}
+                    onPress={() => navToCrewWeek(c.crewId)}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={[styles.crewWeekBoxValue, c.daysMultiJobs > 0 && { color: '#dc2626' }]}>
+                      {c.daysMultiJobs}
+                    </Text>
+                    <Text style={styles.crewWeekBoxLabel}>Days Multi Jobs</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* Crew $ */}
         <SectionLabel title="Crew $" />
@@ -812,6 +894,42 @@ const styles = StyleSheet.create({
   pastDueLabelInactive: { color: colors.textMuted },
   pastDueValue: { fontSize: 22, fontWeight: '800', color: '#dc2626' },
   pastDueValueInactive: { color: '#9ca3af' },
+
+  // Crew Jobs This Week
+  crewWeekRow: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.07, shadowRadius: 4, elevation: 2,
+  },
+  crewWeekName:  { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
+  crewWeekBoxes: { flexDirection: 'row', gap: 6 },
+  crewWeekBox: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f9fafb',
+  },
+  crewWeekBoxTotal: { borderColor: '#bbf7d0', backgroundColor: '#f0fdf4' },
+  crewWeekBoxAlert: { borderColor: '#fed7aa', backgroundColor: '#fff7ed' },
+  crewWeekBoxWarn:  { borderColor: '#fecaca', backgroundColor: '#fef2f2' },
+  crewWeekBoxValue: { fontSize: 18, fontWeight: '800', color: colors.textPrimary },
+  crewWeekBoxLabel: { fontSize: 10, color: colors.textMuted, marginTop: 2, textAlign: 'center', fontWeight: '600' },
+
+  crewWeekEmpty: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  crewWeekEmptyText: { fontSize: 13, color: colors.textMuted },
 
   pipelineBox: {
     flex: 1,

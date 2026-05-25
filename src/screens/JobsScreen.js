@@ -102,6 +102,7 @@ export default function JobsScreen() {
   const [dateFilter,  setDateFilter]  = useState(null);
   const [weekFilter,  setWeekFilter]  = useState(null); // { start: 'YYYY-MM-DD', end: 'YYYY-MM-DD' }
   const [crewPayFilter, setCrewPayFilter] = useState(null); // null | 'paid' | 'unpaid'
+  const [crewIdFilter,  setCrewIdFilter]  = useState(null); // matches a specific crew when set
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE); // kept for load-more footer
 
   // Apply filter from navigation params.
@@ -117,7 +118,8 @@ export default function JobsScreen() {
       p.date         != null ||
       p.weekStart    != null ||
       p.weekEnd      != null ||
-      p.crewPay      != null;
+      p.crewPay      != null ||
+      p.crewId       != null;
     if (!hasIncoming) return;
 
     setFilter(p.filter ? normalizeFilter(p.filter) : 'All');
@@ -125,6 +127,7 @@ export default function JobsScreen() {
     setMonthFilter(p.month || null);
     setWeekFilter((p.weekStart && p.weekEnd) ? { start: p.weekStart, end: p.weekEnd } : null);
     setCrewPayFilter(p.crewPay || null);
+    setCrewIdFilter(p.crewId || null);
     setSearch('');
 
     navigation.setParams({
@@ -135,6 +138,7 @@ export default function JobsScreen() {
       weekStart:    null,
       weekEnd:      null,
       crewPay:      null,
+      crewId:       null,
     });
   }, [
     route.params?.clearFilters,
@@ -144,12 +148,13 @@ export default function JobsScreen() {
     route.params?.weekStart,
     route.params?.weekEnd,
     route.params?.crewPay,
+    route.params?.crewId,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset pagination when filters change
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter]);
+  }, [filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter, crewIdFilter]);
 
   // Pull-to-refresh is a visual acknowledgement only — the jobs subscription
   // in AppDataContext is already live, so data is current. A short spinner
@@ -168,6 +173,7 @@ export default function JobsScreen() {
     setMonthFilter(null);
     setWeekFilter(null);
     setCrewPayFilter(null);
+    setCrewIdFilter(null);
     setSearch('');
   }, []);
 
@@ -208,6 +214,7 @@ export default function JobsScreen() {
     if (monthFilter && !(job.targetDate || '').startsWith(monthFilter)) return false;
     if (crewPayFilter === 'paid'   && !job.crewPaidAt) return false;
     if (crewPayFilter === 'unpaid' && (!job.crewId || job.crewPaidAt)) return false;
+    if (crewIdFilter   && job.crewId !== crewIdFilter)  return false;
     if (!jobMatchesFilter(job, filter)) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -219,7 +226,7 @@ export default function JobsScreen() {
       );
     }
     return true;
-  }), [sorted, filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter]);
+  }), [sorted, filter, search, dateFilter, monthFilter, weekFilter, crewPayFilter, crewIdFilter]);
 
   return (
     <SafeAreaView style={styles.container}>
