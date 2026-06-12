@@ -1035,9 +1035,29 @@ export default function SettingsScreen() {
                         <Text style={styles.userBuildName}>{name}</Text>
                         <Text style={styles.userBuildId}>{buildLabel}</Text>
                       </View>
-                      <Text style={[styles.userBuildStatus, { color: isCurrent ? colors.primary : colors.danger }]}>
-                        {isCurrent ? '✓ Current' : 'Needs Update'}
-                      </Text>
+                      {isCurrent ? (
+                        <Text style={[styles.userBuildStatus, { color: colors.primary }]}>
+                          ✓ Current
+                        </Text>
+                      ) : (
+                        // Tapping the red badge opens the install link in Safari so
+                        // the user can update directly from this row.
+                        <TouchableOpacity
+                          onPress={() => {
+                            if (updateInstallUrl) {
+                              Linking.openURL(updateInstallUrl).catch((err) =>
+                                console.warn('[settings] open install URL failed:', err?.message || err));
+                            } else {
+                              Alert.alert('No install link', 'No build install link is available yet.');
+                            }
+                          }}
+                          hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+                        >
+                          <Text style={[styles.userBuildStatus, { color: colors.danger }]}>
+                            Needs Update
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                       {!isCurrent ? (
                         <TouchableOpacity
                           onPress={() => nudgeUserToUpdate(u)}
