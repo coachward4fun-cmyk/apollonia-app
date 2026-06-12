@@ -2,14 +2,18 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   TouchableOpacity, TextInput, KeyboardAvoidingView, Platform,
-  Alert, ActivityIndicator, Modal, useWindowDimensions,
+  Alert, ActivityIndicator, Modal, useWindowDimensions, Linking,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { getJobs, saveJob, deleteJob, assignJobId, getJobTypes, getExpenses, saveExpense, saveCustomer } from '../services/db';
 import { useAppData } from '../context/AppDataContext';
 import { uploadJobPhoto, deleteStoragePhoto, storagePathFromUrl } from '../services/storageService';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../config/firebase';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { requestCameraPermission, requestPhotoLibraryPermission } from '../utils/permissions';
+import { extractJobFromImage } from '../services/aiService';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { InteractionManager } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,6 +21,7 @@ import { colors } from '../theme/colors';
 import { useAuth } from '../context/AuthContext';
 import DatePickerField from '../components/DatePickerField';
 import AddressAutocomplete from '../components/AddressAutocomplete';
+import RoofEstimateModal from '../components/RoofEstimateModal';
 import { logActivity } from '../services/activityLog';
 import { navigationRef } from '../utils/navigationRef';
 
@@ -93,9 +98,10 @@ export default function JobFormScreen() {
 
   const crews    = contextCrews.length > 0 ? contextCrews : [];
   const jobTypes = contextJobTypes.length > 0 ? contextJobTypes.map((t) => t.name) : FALLBACK_JOB_TYPES;
-  const [saving,   setSaving]   = useState(false);
-  const [toast,    setToast]    = useState('');
-  const [seqId,    setSeqId]    = useState(null); // "YY-####" job ID
+  const [saving,    setSaving]    = useState(false);
+  const [importing, setImporting] = useState(false); // photo→fields extraction in progress
+  const [toast,     setToast]     = useState('');
+  const [seqId,     setSeqId]     = useState(null); // "YY-####" job ID
 
   const [projectName,        setProjectName]        = useState('');
   const [jobType,            setJobType]            = useState(isEdit ? '' : 'Roofing');
@@ -130,6 +136,18 @@ export default function JobFormScreen() {
   // failed     – true if upload encountered an error
   const [photos,      setPhotos]      = useState([]);
   const [removedUrls, setRemovedUrls] = useState([]); // Storage URLs to delete after save
+
+  // Firebase Storage URL of the most-recently-sent invoice PDF. Populated on
+  // load from the job doc; powers the "View Invoice" link.
+  const [invoicePdfUrl, setInvoicePdfUrl] = useState('');
+
+  // AI roof estimate state — populated from the job doc on load.
+  // roofEstimate.status can be 'pending' | 'complete' | 'failed' | undefined.
+  const [roofEstimate,          setRoofEstimate]          = useState(null);
+  const [aerialPhotoBase64,     setAerialPhotoBase64]     = useState('');
+  const [streetViewPhotoBase64, setStreetViewPhotoBase64] = useState('');
+  const [showEstimateModal,     setShowEstimateModal]     = useState(false);
+  const [estimateLaunching,     setEstimateLaunching]     = useState(false);
 
   const [showStatusPicker,  setShowStatusPicker]  = useState(false);
   const [showCrewPicker,    setShowCrewPicker]    = useState(false);
@@ -171,6 +189,10 @@ export default function JobFormScreen() {
             setEmail(job.email || '');
             setPhone(job.phone || '');
             setJobLocationAddress(job.jobLocationAddress || '');
+            // Sync the address-change watcher baseline. Synchronous ref write
+            // happens before React re-renders, so the watcher's first run sees
+            // matching values and doesn't fire a spurious alert.
+            prevAddressRef.current = job.jobLocationAddress || '';
             setCrewId(job.crewId || '');
             setSalesperson(job.salesperson || '');
             setEstimatedDuration(job.estimatedDuration || '1');
@@ -178,6 +200,10 @@ export default function JobFormScreen() {
             setInvoiceDate(job.invoiceDate || '');
             setDueDate(job.dueDate || '');
             setInvoiceTotal(job.invoiceTotal != null ? String(job.invoiceTotal) : '');
+            setInvoicePdfUrl(job.invoicePdfUrl || '');
+            setRoofEstimate(job.roofEstimate || null);
+            setAerialPhotoBase64(job.aerialPhotoBase64 || '');
+            setStreetViewPhotoBase64(job.streetViewPhotoBase64 || '');
             setNotes(job.notes || '');
             setCrewLeads(job.crewLeads != null ? String(job.crewLeads) : '1');
             setCrewHelpers(job.crewHelpers != null ? String(job.crewHelpers) : '1');
@@ -194,13 +220,23 @@ export default function JobFormScreen() {
             setWorkerRate(job.workerDailyRate != null ? String(job.workerDailyRate) : '250');
 
             if (job.photos && job.photos.length > 0) {
-              setPhotos(job.photos.map((url) => ({
-                key:        url.split('/').pop().split('?')[0] || generateId(),
-                uri:        url,
-                storageUrl: url,
-                uploading:  false,
-                failed:     false,
-              })));
+              // Legacy entries are bare URL strings; newer (incl. AI-added) are
+              // { uri, label, createdAt } objects. Normalize both shapes and
+              // carry label/createdAt forward so the save path can round-trip
+              // them — without this they'd be stripped on the next save.
+              setPhotos(job.photos.map((entry) => {
+                const isObj = typeof entry === 'object' && entry !== null;
+                const url   = isObj ? (entry.uri || '') : entry;
+                return {
+                  key:        url.split('/').pop().split('?')[0] || generateId(),
+                  uri:        url,
+                  storageUrl: url,
+                  uploading:  false,
+                  failed:     false,
+                  ...(isObj && entry.label     ? { label:     entry.label     } : {}),
+                  ...(isObj && entry.createdAt ? { createdAt: entry.createdAt } : {}),
+                };
+              }));
             }
 
           }
@@ -217,6 +253,7 @@ export default function JobFormScreen() {
           if (prefill.phone)              setPhone(prefill.phone);
           if (prefill.jobType)            setJobType(prefill.jobType);
           if (prefill.jobLocationAddress) setJobLocationAddress(prefill.jobLocationAddress);
+          prevAddressRef.current = prefill.jobLocationAddress || '';
           if (prefill.targetDate)         setTargetDate(prefill.targetDate);
           if (prefill.crewId)             setCrewId(prefill.crewId);
           if (prefill.salesperson)        setSalesperson(prefill.salesperson);
@@ -342,6 +379,77 @@ export default function JobFormScreen() {
     }
   }, [photos.length, startPhotoUploads]);
 
+  // ── Import job details from a photo/screenshot (Claude Vision) ──────────────
+  // Fills matching form fields from a subcontractor job-assignment screenshot.
+  const applyImportedFields = useCallback((fields) => {
+    if (!fields || typeof fields !== 'object') return;
+
+    if (fields.projectName)        setProjectName(String(fields.projectName));
+    if (fields.jobLocationAddress) setJobLocationAddress(String(fields.jobLocationAddress));
+    if (fields.targetDate)         setTargetDate(String(fields.targetDate));
+    if (fields.jobType)            setJobType(String(fields.jobType));
+    if (fields.billToName)         setBillToName(String(fields.billToName));
+
+    // Homeowner name is for notes only — prepend it to the instructions text.
+    const noteParts = [];
+    if (fields.homeownerName) noteParts.push(`Homeowner: ${String(fields.homeownerName)}`);
+    if (fields.notes)         noteParts.push(String(fields.notes));
+    if (noteParts.length)     setNotes(noteParts.join('\n'));
+
+    // If the billing customer matches an existing customer, pull their profile.
+    if (fields.billToName) {
+      const target = String(fields.billToName).trim().toLowerCase();
+      const match  = (contextCustomers || []).find(
+        (c) => (c.name || '').trim().toLowerCase() === target,
+      );
+      if (match) {
+        if (match.address)     setBillToAddress(match.address);
+        if (match.email)       setEmail(match.email);
+        if (match.phone)       setPhone(match.phone);
+        if (match.salesperson) setSalesperson(match.salesperson);
+      }
+    }
+  }, [contextCustomers]);
+
+  const importFromPhoto = useCallback(async (source) => {
+    try {
+      let result;
+      if (source === 'camera') {
+        if (!(await requestCameraPermission())) return;
+        result = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 });
+      } else {
+        if (!(await requestPhotoLibraryPermission())) return;
+        result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 1 });
+      }
+      if (result.canceled) return;
+
+      setImporting(true);
+      // Resize + JPEG-compress to base64 — keeps the vision payload small while
+      // preserving enough resolution to read the screenshot text.
+      const manipulated = await ImageManipulator.manipulateAsync(
+        result.assets[0].uri,
+        [{ resize: { width: 1280 } }],
+        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+      );
+      const fields = await extractJobFromImage({ base64: manipulated.base64, mediaType: 'image/jpeg' });
+      applyImportedFields(fields);
+      setToast('Job imported — please review fields');
+      setTimeout(() => setToast(''), 3000);
+    } catch (err) {
+      Alert.alert('Import failed', err.message || 'Could not read the job details from that image.');
+    } finally {
+      setImporting(false);
+    }
+  }, [applyImportedFields]);
+
+  const handleImportFromPhoto = useCallback(() => {
+    Alert.alert('Import from Photo', 'Read job details from a screenshot.', [
+      { text: 'Take Photo',          onPress: () => importFromPhoto('camera') },
+      { text: 'Choose from Library', onPress: () => importFromPhoto('library') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [importFromPhoto]);
+
   const handleDeletePhoto = useCallback((index) => {
     Alert.alert('Remove Photo', 'Remove this photo from the job?', [
       { text: 'Cancel', style: 'cancel' },
@@ -438,17 +546,23 @@ export default function JobFormScreen() {
         }
       }
 
-      // Collect final photo URLs. For photos still uploading, await their promises
-      // (all in parallel via Promise.all so we don't serialize waiting).
-      const photoUrlPromises = photos.map(async (photo) => {
-        if (photo.storageUrl) return photo.storageUrl;
-        if (photo.uploading && uploadPromisesRef.current[photo.key]) {
-          return uploadPromisesRef.current[photo.key]; // already a promise
+      // Collect final photo entries as objects so label/createdAt round-trip
+      // through saves (instead of being stripped to bare URL strings). Still
+      // awaits any in-flight uploads in parallel — failed photos are excluded.
+      const photoEntryPromises = photos.map(async (photo) => {
+        let url = photo.storageUrl;
+        if (!url && photo.uploading && uploadPromisesRef.current[photo.key]) {
+          url = await uploadPromisesRef.current[photo.key];
         }
-        return null; // failed — exclude
+        if (!url) return null; // failed upload — exclude
+        return {
+          uri: url,
+          ...(photo.label     ? { label:     photo.label     } : {}),
+          ...(photo.createdAt ? { createdAt: photo.createdAt } : {}),
+        };
       });
-      const rawUrls    = await Promise.all(photoUrlPromises);
-      const photoUrls  = rawUrls.filter(Boolean);
+      const rawEntries   = await Promise.all(photoEntryPromises);
+      const photoEntries = rawEntries.filter(Boolean);
 
       // On new jobs with a target date, auto-promote the default "Not Scheduled"
       // status to "Scheduled". Edits and user-chosen statuses are left alone.
@@ -476,8 +590,8 @@ export default function JobFormScreen() {
         dueDate:            dueDate.trim(),
         invoiceTotal:       invoiceTotal ? parseFloat(invoiceTotal) : null,
         notes:              notes.trim(),
-        photos:             photoUrls,
-        photoCount:         photoUrls.length,
+        photos:             photoEntries,
+        photoCount:         photoEntries.length,
         crewLeads:          parseInt(crewLeads)    || 0,
         crewHelpers:        parseInt(crewHelpers)  || 0,
         crewWorkers:        parseInt(crewWorkers)  || 0,
@@ -563,6 +677,203 @@ export default function JobFormScreen() {
       }, 700);
     }
   }, [removedUrls, navigation]);
+
+  // ── AI Roof Estimator ──────────────────────────────────────────────────────
+  //
+  // Tap "Get Estimate" → geocode address → flip status to 'pending' in
+  // Firestore + locally → fire the roofEstimator callable (NOT awaited).
+  // The Cloud Function does the slow work in the background and writes the
+  // final roofEstimate + photos to the job doc, then pushes a notification.
+  // The user is told to expect the push; the form will reflect the new state
+  // next time it loads the job.
+
+  const runRoofEstimate = useCallback(async () => {
+    const trimmed = jobLocationAddress.trim();
+    if (!trimmed) {
+      Alert.alert('Address Required', 'Add the job location address before requesting an estimate.');
+      return;
+    }
+    setEstimateLaunching(true);
+    try {
+      const jobId = jobInstanceId.current;
+      const pendingEstimate = { status: 'pending' };
+
+      // Optimistic write — button flips to "Estimating…" immediately.
+      try {
+        await saveJob({ id: jobId, roofEstimate: pendingEstimate });
+      } catch (writeErr) {
+        console.warn('[RoofEstimate] could not write pending state:', writeErr.message);
+      }
+      setRoofEstimate(pendingEstimate);
+
+      // Fire-and-forget — the Cloud Function geocodes server-side using the
+      // function's GOOGLE_MAPS_KEY (the client key was being blocked). The
+      // estimate takes 10-30s; result + push surface the outcome on completion.
+      httpsCallable(functions, 'roofEstimator')({
+        jobId,
+        address: trimmed,
+      }).catch((err) => {
+        console.warn('[RoofEstimate] callable failed:', err?.message || err);
+      });
+
+      setToast("Estimating in background — you'll be notified when done.");
+      setTimeout(() => setToast(''), 3000);
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not start the roof estimate.');
+    } finally {
+      setEstimateLaunching(false);
+    }
+  }, [jobLocationAddress]);
+
+  const handleGetEstimate = useCallback(() => {
+    if (roofEstimate?.status === 'complete') {
+      Alert.alert(
+        'Replace Estimate?',
+        'An estimate already exists. Replace it?',
+        [
+          { text: 'Cancel',  style: 'cancel' },
+          { text: 'Replace', style: 'destructive', onPress: runRoofEstimate },
+        ],
+      );
+      return;
+    }
+    runRoofEstimate();
+  }, [roofEstimate, runRoofEstimate]);
+
+  const handleApplyEstimateToLineItems = useCallback(async () => {
+    if (!roofEstimate || roofEstimate.status !== 'complete') return;
+    const squares = Number(roofEstimate.squares) || 0;
+    if (squares <= 0) return;
+    try {
+      const jobs = await getJobs();
+      const job  = jobs.find((j) => j.id === jobInstanceId.current);
+      const existing = (job?.lineItems || []).map((i) => ({
+        description: i.description,
+        qty:         Number(i.qty) || 0,
+        unitPrice:   Number(i.unitPrice) || 0,
+      }));
+      const idx = existing.findIndex((i) => /roof/i.test(i.description || ''));
+      let nextItems;
+      if (idx >= 0) {
+        nextItems = existing.map((item, i) => i === idx ? { ...item, qty: squares } : item);
+      } else {
+        nextItems = [...existing, { description: 'Roofing (estimated)', qty: squares, unitPrice: 0 }];
+      }
+      await saveJob({ id: jobInstanceId.current, lineItems: nextItems });
+      setShowEstimateModal(false);
+      setToast('Line items updated');
+      setTimeout(() => setToast(''), 1500);
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not update line items.');
+    }
+  }, [roofEstimate]);
+
+  // Shared between the modal "Discard Estimate" button and the address-change
+  // alert's "Remove" action. Removes roofEstimate + base64 fields from the job,
+  // strips AI photos from the photos array, cleans up Storage best-effort,
+  // and resets local state. Set closeModal=true when called from the modal.
+  const clearRoofEstimate = useCallback(async ({ closeModal = false } = {}) => {
+    try {
+      const jobs = await getJobs();
+      const job  = jobs.find((j) => j.id === jobInstanceId.current);
+      const currentPhotos = job?.photos || [];
+
+      // URLs of AI-added photos so we can purge them from Storage afterwards.
+      const aiUrls = currentPhotos
+        .filter((p) => typeof p === 'object' && p && (p.label === 'AI Aerial View' || p.label === 'AI Street View'))
+        .map((p) => p.uri)
+        .filter(Boolean);
+
+      const filteredPhotos = currentPhotos.filter((p) => {
+        if (typeof p === 'string') return true;
+        return p?.label !== 'AI Aerial View' && p?.label !== 'AI Street View';
+      });
+
+      await saveJob({
+        id:                   jobInstanceId.current,
+        roofEstimate:         null,
+        aerialPhotoBase64:    '',
+        streetViewPhotoBase64: '',
+        photos:               filteredPhotos,
+        photoCount:           filteredPhotos.length,
+      });
+
+      // Best-effort Storage cleanup so the AI files don't orphan.
+      for (const url of aiUrls) {
+        const path = storagePathFromUrl(url);
+        if (path) deleteStoragePhoto(path).catch(() => {});
+      }
+
+      setRoofEstimate(null);
+      setAerialPhotoBase64('');
+      setStreetViewPhotoBase64('');
+      setPhotos(filteredPhotos.map((entry) => {
+        const isObj = typeof entry === 'object' && entry !== null;
+        const url   = isObj ? (entry.uri || '') : entry;
+        return {
+          key:        url.split('/').pop().split('?')[0] || generateId(),
+          uri:        url,
+          storageUrl: url,
+          uploading:  false,
+          failed:     false,
+          ...(isObj && entry.label     ? { label:     entry.label     } : {}),
+          ...(isObj && entry.createdAt ? { createdAt: entry.createdAt } : {}),
+        };
+      }));
+
+      if (closeModal) setShowEstimateModal(false);
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not discard the estimate.');
+    }
+  }, []);
+
+  const handleDiscardEstimate = useCallback(() => {
+    Alert.alert(
+      'Discard Estimate',
+      'Discard this estimate? The aerial and street view photos will also be removed from the job.',
+      [
+        { text: 'Cancel',  style: 'cancel' },
+        { text: 'Discard', style: 'destructive', onPress: () => clearRoofEstimate({ closeModal: true }) },
+      ],
+    );
+  }, [clearRoofEstimate]);
+
+  // CHANGE 3 — Address-change watcher fires only on blur (when the user
+  // commits/leaves the address field), not on every keystroke. prevAddressRef
+  // tracks the last committed address; we sync it in loadData so the first
+  // blur after a fresh load is a no-op.
+  const prevAddressRef = useRef('');
+  const handleAddressBlur = useCallback(() => {
+    if (jobLocationAddress === prevAddressRef.current) return;
+    const status = roofEstimate?.status;
+    if (status !== 'complete' && status !== 'failed') {
+      // No estimate to invalidate — just track the new committed value.
+      prevAddressRef.current = jobLocationAddress;
+      return;
+    }
+    Alert.alert(
+      'Address Changed',
+      'Address changed — remove existing estimate and photos?',
+      [
+        {
+          text: 'Cancel', style: 'cancel',
+          onPress: () => setJobLocationAddress(prevAddressRef.current),
+        },
+        {
+          text: 'Remove', style: 'destructive',
+          onPress: async () => {
+            await clearRoofEstimate({ closeModal: false });
+            prevAddressRef.current = jobLocationAddress;
+          },
+        },
+      ],
+    );
+  }, [jobLocationAddress, roofEstimate, clearRoofEstimate]);
+
+  // Show the estimate button only for roofing jobs with an address on file.
+  const isRoofingJob   = /roof/i.test(jobType || '');
+  const showEstimateBtn = isRoofingJob && jobLocationAddress.trim().length > 0;
+  const estimateStatus = roofEstimate?.status;
 
   const toggleRecurringSelection = useCallback((expenseId) => {
     setSelectedRecurringIds((prev) => {
@@ -753,6 +1064,24 @@ export default function JobFormScreen() {
             <Text style={styles.jobIdBadge}>Job {seqId}</Text>
           ) : null}
 
+          {!isEdit && (
+            <TouchableOpacity
+              style={styles.importBtn}
+              onPress={handleImportFromPhoto}
+              disabled={importing}
+              activeOpacity={0.7}
+            >
+              {importing ? (
+                <ActivityIndicator color={colors.primary} size="small" />
+              ) : (
+                <Ionicons name="scan-outline" size={18} color={colors.primary} />
+              )}
+              <Text style={styles.importBtnText}>
+                {importing ? 'Reading photo…' : 'Import from Photo'}
+              </Text>
+            </TouchableOpacity>
+          )}
+
           <View style={isLandscape ? styles.formRow : null}>
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="PROJECT NAME *" />
@@ -784,6 +1113,18 @@ export default function JobFormScreen() {
               <DatePickerField value={targetDate} onChange={handleTargetDateChange} placeholder="Select target date…" />
             </View>
           </View>
+
+          {/* View Invoice link — only when an invoice PDF has been uploaded for
+              this job and the status indicates it's been sent or paid. */}
+          {invoicePdfUrl && (status === 'Invoice Sent' || status === 'Invoice Paid') && (
+            <TouchableOpacity
+              onPress={() => Linking.openURL(invoicePdfUrl).catch(() => Alert.alert('Cannot open', 'Could not open the invoice PDF.'))}
+              style={styles.viewInvoiceLink}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            >
+              <Text style={styles.viewInvoiceLinkText}>View Invoice →</Text>
+            </TouchableOpacity>
+          )}
 
           <View style={isLandscape ? styles.formRow : null}>
             <View style={isLandscape ? styles.formCell : null}>
@@ -944,16 +1285,69 @@ export default function JobFormScreen() {
 
           <FormLabel text="CUSTOMER PHONE" />
           <View style={styles.inputCard}>
-            <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
+            <TextInput style={[styles.input, { flex: 1 }]} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
+            {phone.trim().length > 0 && (
+              <TouchableOpacity
+                onPress={() => Linking.openURL('tel:' + phone.trim()).catch(() => Alert.alert('Cannot dial', 'Phone calls are not supported on this device.'))}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.phoneCallBtn}
+              >
+                <Ionicons name="call-outline" size={20} color="#16a34a" />
+              </TouchableOpacity>
+            )}
           </View>
 
           <FormLabel text="JOB LOCATION ADDRESS" />
           <AddressAutocomplete
             value={jobLocationAddress}
             onChangeText={setJobLocationAddress}
+            onBlur={handleAddressBlur}
             placeholder="Site address"
             placeholderTextColor={colors.textMuted}
           />
+
+          {/* AI Roof Estimator — only for roofing jobs with an address. */}
+          {showEstimateBtn && (
+            <View style={styles.roofEstimateRow}>
+              {estimateStatus === 'pending' ? (
+                <View style={[styles.roofEstimateBtn, styles.roofEstimateBtnPending]}>
+                  <ActivityIndicator size="small" color={colors.textMuted} />
+                  <Text style={[styles.roofEstimateBtnText, styles.roofEstimateBtnTextPending]}>Estimating…</Text>
+                </View>
+              ) : estimateStatus === 'complete' ? (
+                <TouchableOpacity
+                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnComplete]}
+                  onPress={() => setShowEstimateModal(true)}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
+                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>View Estimate</Text>
+                </TouchableOpacity>
+              ) : estimateStatus === 'failed' ? (
+                <TouchableOpacity
+                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnFailed]}
+                  onPress={handleGetEstimate}
+                  activeOpacity={0.75}
+                  disabled={estimateLaunching}
+                >
+                  <Ionicons name="alert-circle-outline" size={18} color="#fff" />
+                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>Estimate Failed — Retry</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnIdle]}
+                  onPress={handleGetEstimate}
+                  activeOpacity={0.75}
+                  disabled={estimateLaunching}
+                >
+                  {estimateLaunching
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <Ionicons name="home-outline" size={18} color="#fff" />}
+                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>Get Estimate</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
 
           <View style={isLandscape ? styles.formRow : null}>
             <View style={isLandscape ? styles.formCell : null}>
@@ -1208,10 +1602,20 @@ export default function JobFormScreen() {
           if (key) {
             const picked = crews.find((c) => c.id === key);
             if (picked) {
+              // New crew model: crewSize is total headcount incl. lead. Default
+              // allocation is 1 lead + 1 helper + the rest as workers. The helper
+              // only applies when the crew is big enough (crewSize >= 2) — a
+              // 1-person crew is just the lead. Fall back to members.length + 1
+              // for any pre-migration crew doc.
+              const crewSize = picked.crewSize != null
+                ? picked.crewSize
+                : ((picked.members || []).length + 1);
               setCrewLeads('1');
-              setCrewHelpers('1');
-              // totalSize = 1 lead + members.length; workers = totalSize - 2
-              setCrewWorkers(String(Math.max(0, (picked.members || []).length - 1)));
+              setCrewHelpers(crewSize >= 2 ? '1' : '0');
+              setCrewWorkers(String(Math.max(0, crewSize - 2)));
+              setLeadRate(String(picked.leadDailyRate     != null ? picked.leadDailyRate     : 300));
+              setWorkerRate(String(picked.workerDailyRate != null ? picked.workerDailyRate   : 250));
+              setHelperRate(String(picked.helperDailyRate != null ? picked.helperDailyRate   : 150));
             }
           }
         }}
@@ -1400,6 +1804,17 @@ export default function JobFormScreen() {
           </View>
         </View>
       </Modal>
+
+      <RoofEstimateModal
+        visible={showEstimateModal}
+        roofEstimate={roofEstimate}
+        aerialPhotoBase64={aerialPhotoBase64}
+        streetViewPhotoBase64={streetViewPhotoBase64}
+        jobId={jobInstanceId.current}
+        onClose={() => setShowEstimateModal(false)}
+        onDiscard={handleDiscardEstimate}
+        onApplyToLineItems={handleApplyEstimateToLineItems}
+      />
     </SafeAreaView>
   );
 }
@@ -1485,6 +1900,30 @@ const styles = StyleSheet.create({
   },
   inputPrefix:    { fontSize: 16, color: colors.textSecondary, marginRight: 4 },
   input:          { fontSize: 15, color: colors.textPrimary, paddingVertical: 14, flex: 1 },
+  phoneCallBtn:   { paddingHorizontal: 8, paddingVertical: 4 },
+  viewInvoiceLink: { paddingHorizontal: 4, paddingVertical: 8, marginTop: 4, marginBottom: 4 },
+  viewInvoiceLinkText: { fontSize: 14, color: '#16a34a', fontWeight: '700' },
+
+  // AI Roof Estimator
+  roofEstimateRow: { marginTop: 10, marginBottom: 4 },
+  roofEstimateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06, shadowRadius: 3, elevation: 1,
+  },
+  roofEstimateBtnIdle:     { backgroundColor: '#16a34a' },
+  roofEstimateBtnPending:  { backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb' },
+  roofEstimateBtnComplete: { backgroundColor: '#2563eb' },
+  roofEstimateBtnFailed:   { backgroundColor: '#dc2626' },
+  roofEstimateBtnText:     { fontSize: 14, fontWeight: '700' },
+  roofEstimateBtnTextPending: { color: colors.textMuted },
+
   inputMulti:     { minHeight: 60, textAlignVertical: 'top', paddingTop: 14 },
   inputMultiTall: { minHeight: 90, textAlignVertical: 'top', paddingTop: 14 },
 
@@ -1534,6 +1973,13 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: '#86efac', borderStyle: 'dashed', marginBottom: 10,
   },
   addPhotoBtnText: { fontSize: 15, fontWeight: '600', color: colors.primary },
+
+  importBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#f0fdf4', borderRadius: 12, paddingVertical: 13,
+    borderWidth: 1.5, borderColor: '#86efac', borderStyle: 'dashed', marginBottom: 14,
+  },
+  importBtnText: { fontSize: 15, fontWeight: '700', color: colors.primary },
 
   photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 },
 

@@ -51,3 +51,4 @@ functions/node_modules/
 *.ipa
 *.apk
 *.aab
+functions/.env

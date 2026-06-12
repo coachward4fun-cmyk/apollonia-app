@@ -2,7 +2,7 @@ import { db } from '../config/firebase';
 import {
   collection, doc, onSnapshot, setDoc, deleteDoc,
   getDocs, getDoc, writeBatch, runTransaction,
-  query, where,
+  query, where, Timestamp,
 } from 'firebase/firestore';
 
 // ── Firestore sanitizer ────────────────────────────────────────────────────────
@@ -147,6 +147,22 @@ export async function archiveCustomer(customerName) {
     count++;
   }
   await batch.commit();
+}
+
+// Hard-delete a customer document. Caller (CustomerEditScreen.handleDelete)
+// is responsible for verifying there are no active jobs first — this only
+// removes the customers/{id} doc, it does NOT touch jobs (intentionally:
+// historic invoiced/paid jobs keep their billToName for the record).
+export async function deleteCustomer(customerName) {
+  const custDoc = await findCustomerDocByName(customerName);
+  if (!custDoc) throw new Error('Customer not found');
+  await deleteDoc(custDoc.ref);
+}
+
+// Hard-delete a customer by document ID — used by the orphan-cleanup flow
+// where the document may be nameless or otherwise unreachable by name.
+export async function deleteCustomerById(id) {
+  await deleteDoc(doc(db, 'customers', id));
 }
 
 export async function unarchiveCustomer(customerName) {
@@ -383,4 +399,42 @@ export async function saveUser(user) {
 
 export async function deleteUser(id) {
   await deleteDoc(doc(db, 'users', id));
+}
+
+export async function getUsers() {
+  const snap = await getDocs(collection(db, 'users'));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// ── Build info (meta/buildInfo) ──────────────────────────────────────────────
+// Tracks the latest published EAS build so the app can prompt out-of-date
+// installs to update. Written on launch by the first device running a new build.
+
+export async function getBuildInfo() {
+  const snap = await getDoc(doc(db, 'meta', 'buildInfo'));
+  return snap.exists() ? snap.data() : null;
+}
+
+export async function saveBuildInfo(info) {
+  await setDoc(doc(db, 'meta', 'buildInfo'), sanitize(info), { merge: true });
+}
+
+// ── Activity log maintenance ─────────────────────────────────────────────────
+// Deletes activityLog docs older than cutoffDate (a JS Date). Pass null to wipe
+// the whole collection. Commits in chunks of 450 to stay under Firestore's
+// 500-write batch limit. Returns the number of docs deleted.
+
+export async function clearActivityLog(cutoffDate = null) {
+  const colRef = collection(db, 'activityLog');
+  const snap = cutoffDate
+    ? await getDocs(query(colRef, where('timestamp', '<', Timestamp.fromDate(cutoffDate))))
+    : await getDocs(colRef);
+
+  const docs = snap.docs;
+  for (let i = 0; i < docs.length; i += 450) {
+    const batch = writeBatch(db);
+    docs.slice(i, i + 450).forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+  }
+  return docs.length;
 }

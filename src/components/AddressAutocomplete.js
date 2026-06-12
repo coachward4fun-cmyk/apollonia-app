@@ -76,6 +76,7 @@ async function fetchSuggestions(input) {
 export default function AddressAutocomplete({
   value,
   onChangeText,
+  onBlur,
   placeholder = 'Enter address',
   placeholderTextColor = '#9ca3af',
   returnKeyType = 'next',
@@ -108,7 +109,10 @@ export default function AddressAutocomplete({
     if (suppressBlur.current) return;
     // Small delay so onPress on a suggestion can fire before the list disappears
     setTimeout(() => setSuggestions([]), 200);
-  }, []);
+    // Forward to the parent so it can react to commit (e.g. invalidating an
+    // estimate when the address actually changes — not on every keystroke).
+    if (onBlur) onBlur();
+  }, [onBlur]);
 
   const hasSuggestions = suggestions.length > 0;
 

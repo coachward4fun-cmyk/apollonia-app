@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { getCustomers, saveCustomer, getJobs, archiveCustomer } from '../services/db';
+import { getCustomers, saveCustomer, getJobs, archiveCustomer, deleteCustomer } from '../services/db';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
 import AddressAutocomplete from '../components/AddressAutocomplete';
@@ -28,6 +28,7 @@ export default function CustomerEditScreen() {
   const [retail,      setRetail]      = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [archiving,   setArchiving]   = useState(false);
+  const [deleting,    setDeleting]    = useState(false);
   const [successMsg,  setSuccessMsg]  = useState('');
   const successOpacity = useRef(new Animated.Value(0)).current;
 
@@ -90,6 +91,52 @@ export default function CustomerEditScreen() {
       } else {
         await doArchive();
       }
+    } catch (err) {
+      Alert.alert('Error', err.message || 'Could not check jobs.');
+    }
+  };
+
+  // Hard delete — blocked if any active jobs exist (anything not Invoice Paid
+  // or Cancelled). Historic paid/cancelled jobs keep their billToName for the
+  // record; deleting only removes the customers/{id} doc.
+  const handleDelete = async () => {
+    if (deleting || archiving || saving) return;
+    try {
+      const allJobs    = await getJobs();
+      const custJobs   = allJobs.filter((j) => j.billToName === customerName);
+      const activeJobs = custJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return s !== 'invoice paid' && s !== 'cancelled';
+      });
+      if (activeJobs.length > 0) {
+        Alert.alert(
+          'Cannot Delete',
+          `Cannot delete — this customer has ${activeJobs.length} active job${activeJobs.length === 1 ? '' : 's'}. Complete or cancel all jobs before deleting.`,
+        );
+        return;
+      }
+      Alert.alert(
+        'Delete Customer',
+        `Permanently delete ${customerName}? This cannot be undone.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete', style: 'destructive',
+            onPress: async () => {
+              setDeleting(true);
+              try {
+                await deleteCustomer(customerName);
+                logActivity('customer_deleted', `Customer ${customerName} was permanently deleted`);
+                navigation.goBack();
+              } catch (err) {
+                Alert.alert('Error', err.message || 'Could not delete customer.');
+              } finally {
+                setDeleting(false);
+              }
+            },
+          },
+        ],
+      );
     } catch (err) {
       Alert.alert('Error', err.message || 'Could not check jobs.');
     }
@@ -191,14 +238,25 @@ export default function CustomerEditScreen() {
         </View>
 
         <TouchableOpacity
-          style={[styles.archiveBtn, (archiving || saving) && { opacity: 0.5 }]}
+          style={[styles.archiveBtn, (archiving || saving || deleting) && { opacity: 0.5 }]}
           onPress={handleArchive}
-          disabled={archiving || saving}
+          disabled={archiving || saving || deleting}
         >
           {archiving
             ? <ActivityIndicator size="small" color="#b45309" />
             : <Ionicons name="eye-off-outline" size={16} color="#b45309" />}
           <Text style={styles.archiveBtnText}>{archiving ? 'Hiding…' : 'Hide Customer'}</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.deleteBtn, (deleting || archiving || saving) && { opacity: 0.5 }]}
+          onPress={handleDelete}
+          disabled={deleting || archiving || saving}
+        >
+          {deleting
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Ionicons name="trash-outline" size={16} color="#fff" />}
+          <Text style={styles.deleteBtnText}>{deleting ? 'Deleting…' : 'Delete Customer'}</Text>
         </TouchableOpacity>
 
         <View style={{ height: 40 }} />
@@ -327,5 +385,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: '#b45309',
+  },
+
+  deleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: '#dc2626',
+  },
+  deleteBtnText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
   },
 });

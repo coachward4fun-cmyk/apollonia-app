@@ -7,6 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAppData } from '../context/AppDataContext';
 import { colors } from '../theme/colors';
+import { formatPhoneDisplay } from '../utils/phoneUtils';
 
 function getCurrentWeekFriday() {
   const today = new Date();
@@ -88,9 +89,8 @@ export default function CrewsScreen() {
           </View>
         ) : (
           crews.map((crew) => {
-            const leadCount   = crew.lead?.name?.trim() ? 1 : 0;
-            const memberCount = (crew.members || []).filter((m) => m.name?.trim()).length;
-            const totalCount  = leadCount + memberCount;
+            // New crew model: crewSize is total headcount incl. lead.
+            const crewSize    = crew.crewSize != null ? crew.crewSize : 1;
             const lastPaidAt  = paidMap[crew.id];
             const paidThisWeek = isCurrentWeek(lastPaidAt);
 
@@ -103,7 +103,7 @@ export default function CrewsScreen() {
                   <Text style={styles.crewName}>{crew.name}</Text>
                   <View style={styles.memberBadge}>
                     <Ionicons name="people" size={13} color={colors.primary} />
-                    <Text style={styles.memberCount}>{totalCount}</Text>
+                    <Text style={styles.memberCount}>{crewSize}</Text>
                   </View>
                 </View>
 
@@ -114,10 +114,15 @@ export default function CrewsScreen() {
                   </View>
                 ) : null}
 
+                <View style={styles.metaRow}>
+                  <Ionicons name="people-outline" size={13} color={colors.textMuted} />
+                  <Text style={styles.metaText}>{crewSize} member{crewSize === 1 ? '' : 's'}</Text>
+                </View>
+
                 {crew.lead?.mobile ? (
                   <View style={styles.metaRow}>
                     <Ionicons name="call-outline" size={13} color={colors.textMuted} />
-                    <Text style={styles.metaText}>{crew.lead.mobile}</Text>
+                    <Text style={styles.metaText}>{formatPhoneDisplay(crew.lead.mobile)}</Text>
                   </View>
                 ) : null}
 
@@ -136,18 +141,6 @@ export default function CrewsScreen() {
                   )}
                 </View>
 
-                <View style={styles.memberPreview}>
-                  {(crew.members || []).slice(0, 4).map((m, i) => (
-                    <View key={i} style={styles.memberChip}>
-                      <Text style={styles.memberChipText}>{m.name}</Text>
-                    </View>
-                  ))}
-                  {(crew.members || []).length > 4 && (
-                    <View style={[styles.memberChip, styles.memberChipMore]}>
-                      <Text style={styles.memberChipMoreText}>+{crew.members.length - 4}</Text>
-                    </View>
-                  )}
-                </View>
               </View>
 
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} style={styles.chevron} />
@@ -212,12 +205,6 @@ const styles = StyleSheet.create({
   metaText: { fontSize: 13, color: colors.textSecondary },
   paidGreen: { color: '#16a34a', fontWeight: '600' },
   paidRed:   { color: '#dc2626', fontWeight: '600' },
-
-  memberPreview: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
-  memberChip: { backgroundColor: '#f3f4f6', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
-  memberChipText: { fontSize: 11, fontWeight: '500', color: colors.textSecondary },
-  memberChipMore: { backgroundColor: '#dcfce7' },
-  memberChipMoreText: { fontSize: 11, fontWeight: '700', color: colors.primary },
 
   empty: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },

@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, SafeAreaView, ScrollView,
   ActivityIndicator, TouchableOpacity,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useFocusEffect, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { getExpenses } from '../services/db';
 import { colors } from '../theme/colors';
@@ -48,6 +48,11 @@ function sumOf(list) {
 
 export default function ExpensesYTDScreen() {
   const navigation = useNavigation();
+  const route = useRoute();
+  const handleBack = useCallback(() => {
+    if (route.params?.fromDashboard) { navigation.popToTop(); navigation.navigate('Dashboard'); }
+    else navigation.goBack();
+  }, [navigation, route.params?.fromDashboard]);
   const [expenses, setExpenses] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -77,7 +82,7 @@ export default function ExpensesYTDScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <TouchableOpacity onPress={handleBack} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={22} color={colors.textSecondary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Expenses YTD {year}</Text>

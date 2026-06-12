@@ -17,6 +17,7 @@ import {
   parseSmartJobIntent, resolveDayHint, matchCustomers, matchJobType,
   formatDateLabel, suggestCustomers,
 } from '../utils/smartJobIntent';
+import { setAudioModeAsync } from 'expo-audio';
 
 const GREEN = '#16a34a';
 
@@ -143,6 +144,7 @@ export default function AIAssistantPanel() {
       const flowDef = VOICE_FLOWS[voiceFlow.type];
       const msg = `Voice flow paused at step ${voiceFlow.step + 1} of ${flowDef.steps.length}. Say "resume" to continue, or use the button above.`;
       addMessage({ role: 'assistant', content: msg });
+      console.log('[Panel] → speakText [paused-flow-resume-prompt]');
       speakText(msg);
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -212,6 +214,7 @@ export default function AIAssistantPanel() {
     if (mode) setAutoListenMode(mode);
 
     if (!mode) {
+      console.log('[Panel] → speakText [speakAndListen.no-mode]');
       speakText(text);
       return;
     }
@@ -231,6 +234,7 @@ export default function AIAssistantPanel() {
       activateAutoListen(mode);
     };
 
+    console.log('[Panel] → speakText [speakAndListen.main mode=' + mode + ']');
     speakText(text, { onDone: () => activateOnce('onDone') });
     autoTimeoutRef.current = setTimeout(() => activateOnce('fallback-timer'), fallbackMs);
   }, [stopAutoListen, speakText, activateAutoListen]);
@@ -243,6 +247,7 @@ export default function AIAssistantPanel() {
     if (!step) return;
     const msg = step.question;
     addMessage({ role: 'assistant', content: msg });
+    console.log('[Panel] → speakAndListen [askFlowQuestion]');
     speakAndListen(msg, 'openended');
   }, [addMessage, speakAndListen]);
 
@@ -279,11 +284,13 @@ export default function AIAssistantPanel() {
           logActivity('ai_create_job_voice', `AI voice-created job (legacy flow): ${projectName}`);
           const done = `Done. ${projectName} has been saved.`;
           addMessage({ role: 'assistant', content: done });
+          console.log('[Panel] → speakText [completeFlow.new_job.voice-saved]');
           speakText(done);
           setTimeout(() => closePanel(), 1500);
         } catch (err) {
           const failMsg = `Couldn't save the job: ${err.message || 'unknown error'}`;
           addMessage({ role: 'assistant', content: failMsg });
+          console.log('[Panel] → speakText [completeFlow.new_job.save-failed]');
           speakText(failMsg);
         }
         return;
@@ -302,6 +309,7 @@ export default function AIAssistantPanel() {
 
       const doneMsg = "Great! I've opened the new job form with the details you provided. Review and tap Save.";
       addMessage({ role: 'assistant', content: doneMsg });
+      console.log('[Panel] → speakText [completeFlow.new_job.typed-form-opened]');
       speakText(doneMsg);
 
       cancelVoiceFlow();
@@ -328,6 +336,7 @@ export default function AIAssistantPanel() {
         await saveCustomer(customer);
         const doneMsg = `Customer "${customer.name}" saved successfully.`;
         addMessage({ role: 'assistant', content: doneMsg });
+        console.log('[Panel] → speakText [completeFlow.new_customer.saved]');
         speakText(doneMsg);
       } catch (err) {
         addMessage({ role: 'assistant', content: `Error saving customer: ${err.message}` });
@@ -385,6 +394,7 @@ export default function AIAssistantPanel() {
     const step    = flowDef.steps[voiceFlow.step];
     const msg     = `Resuming. ${step.question}`;
     addMessage({ role: 'assistant', content: msg });
+    console.log('[Panel] → speakAndListen [handleResumeFlow]');
     speakAndListen(msg, voiceFlow.confirming ? 'yesno' : 'openended');
   }, [voiceFlow, resumeVoiceFlow, addMessage, speakAndListen]);
 
@@ -410,6 +420,7 @@ export default function AIAssistantPanel() {
       setVoiceFlow((f) => f ? { ...f, confirming: true, confirmData: fieldData } : f);
       const confirmMsg = `I heard: ${summary}. Is that correct?`;
       addMessage({ role: 'assistant', content: confirmMsg });
+      console.log('[Panel] → speakAndListen [handleFlowStep.confirm]');
       speakAndListen(confirmMsg, 'yesno');
     } catch (err) {
       addMessage({ role: 'assistant', content: 'Sorry, I had trouble understanding that. Please try again.' });
@@ -435,6 +446,7 @@ export default function AIAssistantPanel() {
         const nextStepDef = flowDef.steps[nextStep];
         setVoiceFlow((f) => f ? { ...f, step: nextStep, data: mergedData, confirming: false, confirmData: null } : f);
         addMessage({ role: 'assistant', content: nextStepDef.question });
+        console.log('[Panel] → speakAndListen [handleFlowConfirmation.advance]');
         speakAndListen(nextStepDef.question, 'openended');
       }
     } else if (isNo(userText)) {
@@ -443,10 +455,12 @@ export default function AIAssistantPanel() {
       const question = VOICE_FLOWS[voiceFlow.type].steps[voiceFlow.step].question;
       const retry    = `No problem. ${question}`;
       addMessage({ role: 'assistant', content: retry });
+      console.log('[Panel] → speakAndListen [handleFlowConfirmation.no-retry]');
       speakAndListen(retry, 'openended');
     } else {
       const clarify = "Sorry, I didn't understand. Please say yes or no.";
       addMessage({ role: 'assistant', content: clarify });
+      console.log('[Panel] → speakAndListen [handleFlowConfirmation.clarify]');
       speakAndListen(clarify, 'yesno');
     }
   }, [voiceFlow, setVoiceFlow, addMessage, speakText, completeFlow]);
@@ -456,17 +470,38 @@ export default function AIAssistantPanel() {
   const navigateToJobFormWithPrefill = useCallback((prefill) => {
     setCustomerPicker(null);
     smartCreateFollowupRef.current = null;
+    // Voice session: NEVER open the form. Upstream gating in handleSend and
+    // openJobFormWithCustomer should prevent this path; this is defense-in-depth.
+    if (voiceSessionActive) {
+      const msg = "I couldn't find a customer matching that name. Please add them in the Customers section first, then try again.";
+      addMessage({ role: 'assistant', content: msg });
+      console.log('[Panel] → speakText [navigateToJobFormWithPrefill.voice-bail]');
+      speakText(msg);
+      setTimeout(() => closePanel(), 2500);
+      return;
+    }
     setTimeout(() => {
       closePanel();
       InteractionManager.runAfterInteractions(() => {
         navigationRef.navigate('Jobs', { screen: 'JobForm', params: { jobId: null, prefill } });
       });
     }, 600);
-  }, [closePanel]);
+  }, [closePanel, voiceSessionActive, addMessage, speakText]);
 
   // Speak the "anything else?" follow-up and stash the prefill so handleSend
   // picks the next utterance up as an extension of this smart-create.
+  // Voice sessions don't use this path — they go through startVoiceJobCreate.
   const askForExtraDetailsAndNavigate = useCallback((prefill) => {
+    if (voiceSessionActive) {
+      // Defense-in-depth: voice sessions should never reach here. openJobFormWithCustomer
+      // routes voice paths to startVoiceJobCreate. If we land here anyway, bail safely.
+      const msg = "I couldn't find a customer matching that name. Please add them in the Customers section first, then try again.";
+      addMessage({ role: 'assistant', content: msg });
+      console.log('[Panel] → speakText [askForExtraDetailsAndNavigate.voice-bail]');
+      speakText(msg);
+      setTimeout(() => closePanel(), 2500);
+      return;
+    }
     smartCreateFollowupRef.current = { prefill };
     const parts = [];
     parts.push(prefill.jobType ? `a ${prefill.jobType} job` : 'a new job');
@@ -474,8 +509,13 @@ export default function AIAssistantPanel() {
     if (prefill.targetDate) parts.push(`on ${formatDateLabel(prefill.targetDate)}`);
     const opener = `Got it — ${parts.join(' ')}. Anything else to add, like the address, crew, or notes?`;
     addMessage({ role: 'assistant', content: opener });
-    speakAndListen(opener, 'openended');
-  }, [addMessage, speakAndListen]);
+    // Give the message bubble a moment to render before TTS — without this,
+    // the bubble mount can interrupt the speak call on slower devices.
+    setTimeout(() => {
+      console.log('[Panel] → speakAndListen [askForExtraDetailsAndNavigate]');
+      speakAndListen(opener, 'openended');
+    }, 400);
+  }, [addMessage, speakAndListen, voiceSessionActive, speakText, closePanel]);
 
   // Fully-voice job creation chain — no form, hands-free.
   // Starts after a confident customer match in a voice session. The handleSend
@@ -495,7 +535,12 @@ export default function AIAssistantPanel() {
     const dateStr = targetDate  ? ` on ${formatDateLabel(targetDate)}` : '';
     const opener  = `Got it — ${typeStr} for ${customer.name}${dateStr}. What's the job address?`;
     addMessage({ role: 'assistant', content: opener });
-    speakAndListen(opener, 'openended');
+    // Let the bubble render before TTS — prevents the speak from being
+    // clipped by the conversation list re-render.
+    setTimeout(() => {
+      console.log('[Panel] → speakAndListen [startVoiceJobCreate]');
+      speakAndListen(opener, 'openended');
+    }, 400);
   }, [addMessage, speakAndListen]);
 
   const finishVoiceJobCreate = useCallback(async (state) => {
@@ -504,9 +549,6 @@ export default function AIAssistantPanel() {
 
     const dateLabel = targetDate ? formatDateLabel(targetDate) : '';
     const projectName = [customer.name, matchedType || 'Job', dateLabel].filter(Boolean).join(' - ');
-
-    addMessage({ role: 'assistant', content: 'Creating the job now.' });
-    speakText('Creating the job now.');
 
     const job = {
       id:                 `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -530,24 +572,61 @@ export default function AIAssistantPanel() {
       logActivity('ai_create_job_voice', `AI voice-created job: ${projectName}`);
       const done = `Done. ${projectName} has been saved.`;
       addMessage({ role: 'assistant', content: done });
+      console.log('[Panel] → speakText [finishVoiceJobCreate.done]');
       speakText(done);
       setTimeout(() => closePanel(), 1500);
     } catch (err) {
       const failMsg = `Couldn't save the job: ${err.message || 'unknown error'}`;
       addMessage({ role: 'assistant', content: failMsg });
+      console.log('[Panel] → speakText [finishVoiceJobCreate.failed]');
       speakText(failMsg);
       // Panel stays open on error so the user can retry or close manually.
     }
   }, [addMessage, speakText, closePanel]);
 
+  // Summary + yes/no confirm step. Either reached at the end of the address →
+  // crew → notes chain, or when the user says "done" mid-flow to skip ahead.
+  // The handleSend voice-create block handles the yes/no response.
+  const goToSummaryStep = useCallback((state) => {
+    state.step = 'summary';
+    const { customer, matchedType, targetDate, collected } = state;
+
+    const parts = [];
+    parts.push(matchedType ? `${matchedType.toLowerCase()} job` : 'job');
+    parts.push(`for ${customer.name}`);
+    if (targetDate)                   parts.push(`on ${formatDateLabel(targetDate)}`);
+    if (collected.jobLocationAddress) parts.push(`at ${collected.jobLocationAddress}`);
+    if (collected.crewId) {
+      const crew = crews.find((c) => c.id === collected.crewId);
+      if (crew) parts.push(`with ${crew.name}`);
+    }
+    const question = `Okay — ${parts.join(' ')}. Shall I save it?`;
+    addMessage({ role: 'assistant', content: question });
+    // Render the summary bubble fully before speaking so the user sees the
+    // full text on screen as the AI reads it back.
+    setTimeout(() => {
+      console.log('[Panel] → speakAndListen [voiceCreate.summary]');
+      speakAndListen(question, 'yesno');
+    }, 400);
+  }, [crews, addMessage, speakAndListen]);
+
   const openJobFormWithCustomer = useCallback((customer, targetDate, jobType) => {
     setCustomerPicker(null);
-    if (voiceSessionActive && customer) {
-      // Voice session with a confident customer match → conversational, no form.
-      startVoiceJobCreate(customer, targetDate, jobType);
+    // Voice session: NEVER open the form. With a matched customer → conversational
+    // voice chain. Without one → bail with a spoken message and close.
+    if (voiceSessionActive) {
+      if (customer) {
+        startVoiceJobCreate(customer, targetDate, jobType);
+      } else {
+        const msg = "I couldn't find a customer matching that name. Please add them in the Customers section first, then try again.";
+        addMessage({ role: 'assistant', content: msg });
+        console.log('[Panel] → speakText [openJobFormWithCustomer.voice-bail]');
+        speakText(msg);
+        setTimeout(() => closePanel(), 2500);
+      }
       return;
     }
-    // Typed session OR voice without a customer match → existing form flow.
+    // Typed session → existing form flow.
     const prefill = {
       billToName:         customer?.name        || '',
       billToAddress:      customer?.address     || '',
@@ -561,7 +640,7 @@ export default function AIAssistantPanel() {
       isExistingCustomer: !!customer,
     };
     askForExtraDetailsAndNavigate(prefill);
-  }, [askForExtraDetailsAndNavigate, voiceSessionActive, startVoiceJobCreate]);
+  }, [askForExtraDetailsAndNavigate, voiceSessionActive, startVoiceJobCreate, addMessage, speakText, closePanel]);
 
   const handleSmartCreateJob = useCallback(async ({ typeHint, customer: customerHint, dayHint }) => {
     setIsProcessing(true);
@@ -584,6 +663,15 @@ export default function AIAssistantPanel() {
 
       // Show picker for either no confident match OR multiple confident matches.
       if (customerHint && !matched) {
+        // Voice session can't tap a picker — bail with a spoken message and close.
+        if (voiceSessionActive) {
+          const msg = "I couldn't find a customer matching that name. Please add them in the Customers section first, then try again.";
+          addMessage({ role: 'assistant', content: msg });
+          console.log('[Panel] → speakText [handleSmartCreateJob.voice-bail]');
+          speakText(msg);
+          setTimeout(() => closePanel(), 2500);
+          return;
+        }
         // Pick the candidate list to show in the picker:
         //   - ambiguous case: the equally-confident matches themselves
         //   - no-match case: top suggestions; fall back to most-recent list if none.
@@ -622,23 +710,35 @@ export default function AIAssistantPanel() {
           spoken = `I couldn't find a customer matching ${customerHint}. There are no customers yet.`;
         }
         addMessage({ role: 'assistant', content: msg });
-        speakText(spoken);
+        // Render the picker BEFORE speaking — otherwise the picker mount
+        // interrupts TTS mid-utterance on slower devices.
         setCustomerPicker({ customers: candidates, targetDate: targetDate || '', jobType: matchedType || '' });
+        setTimeout(() => {
+          console.log('[Panel] → speakText [handleSmartCreateJob.no-match]');
+          speakText(spoken);
+        }, 400);
         return;
       }
 
-      const parts = [];
-      if (matchedType) parts.push(`Type: ${matchedType}`);
-      if (matched)     parts.push(`Customer: ${matched.name}`);
-      if (targetDate)  parts.push(`Date: ${formatDateLabel(targetDate)}`);
-      let summary = parts.length
-        ? `Opening new job — ${parts.join(', ')}. Finish the rest of the form when ready.`
-        : `Opening new job form.`;
-      if (typeHint && !matchedType) {
-        summary += ` Job type "${typeHint}" isn't in your list — leaving it blank.`;
+      // In voice sessions, openJobFormWithCustomer routes to startVoiceJobCreate
+      // which speaks its own natural opener. Speaking a typed-flow preamble first
+      // ("Opening new job — Finish the rest of the form when ready") is wrong:
+      // no form is opening, and the preamble contradicts the conversational chain.
+      if (!voiceSessionActive) {
+        const parts = [];
+        if (matchedType) parts.push(`Type: ${matchedType}`);
+        if (matched)     parts.push(`Customer: ${matched.name}`);
+        if (targetDate)  parts.push(`Date: ${formatDateLabel(targetDate)}`);
+        let summary = parts.length
+          ? `Opening new job — ${parts.join(', ')}. Finish the rest of the form when ready.`
+          : `Opening new job form.`;
+        if (typeHint && !matchedType) {
+          summary += ` Job type "${typeHint}" isn't in your list — leaving it blank.`;
+        }
+        addMessage({ role: 'assistant', content: summary });
+        console.log('[Panel] → speakText [handleSmartCreateJob.matched]');
+        speakText(summary);
       }
-      addMessage({ role: 'assistant', content: summary });
-      speakText(summary);
 
       openJobFormWithCustomer(matched, targetDate, matchedType);
     } catch (err) {
@@ -646,13 +746,29 @@ export default function AIAssistantPanel() {
     } finally {
       setIsProcessing(false);
     }
-  }, [addMessage, speakText, setIsProcessing, openJobFormWithCustomer, jobTypes, contextCustomers]);
+  }, [addMessage, speakText, setIsProcessing, openJobFormWithCustomer, jobTypes, contextCustomers, voiceSessionActive, closePanel]);
 
   // ── Main send handler ─────────────────────────────────────────────────────────
 
   const handleSend = useCallback(async (text) => {
     const trimmed = text?.trim();
     if (!trimmed || isProcessing) return;
+
+    // iOS keyboard dictation puts the AVAudioSession into record mode for the
+    // duration of the dictation. After it ends, the session stays in record
+    // mode until something flips it back, so the AI's TTS response plays
+    // silently. Force playback mode here for typed/dictated input — voice
+    // sessions already manage the audio session via the mic-tap path, so
+    // skip the call there to avoid redundant churn.
+    if (!voiceSessionActive) {
+      try {
+        await setAudioModeAsync({
+          playsInSilentMode:      true,
+          allowsRecording:        false,
+          shouldPlayInBackground: false,
+        });
+      } catch (e) { /* best-effort; if it fails, TTS may still be muted */ }
+    }
 
     // Cancel any pending auto-listen state before processing
     clearTimeout(autoTimeoutRef.current);
@@ -678,21 +794,49 @@ export default function AIAssistantPanel() {
       // Anything else → user changed topic; fall through and treat as a new turn.
     }
 
-    // ── Voice job-create chain: address → crew → notes, then saveJob ────────
+    // ── Voice job-create chain: address → crew → notes → summary → save ─────
+    // Per-step: skip keywords advance without capture; "done" jumps to the
+    // summary step (skipping remaining questions); "cancel" aborts entirely.
+    // The summary step asks yes/no; only "yes" triggers the actual save.
     if (voiceCreateStateRef.current) {
       const state = voiceCreateStateRef.current;
 
-      // Cancel — abort gracefully
+      // Cancel — abort gracefully and close the panel (works at any step).
       if (/^(cancel|never\s*mind|forget\s+it|stop)\b/i.test(trimmed)) {
         voiceCreateStateRef.current = null;
         addMessage({ role: 'assistant', content: 'Okay, cancelled.' });
+        console.log('[Panel] → speakText [handleSend.voiceCreate.cancel]');
         speakText('Okay, cancelled.');
+        setTimeout(() => closePanel(), 1500);
         return;
       }
 
-      // Done — save with what we have
+      // Summary step → expect yes/no for the save confirmation.
+      if (state.step === 'summary') {
+        if (isYes(trimmed)) {
+          await finishVoiceJobCreate(state);
+          return;
+        }
+        if (isNo(trimmed)) {
+          voiceCreateStateRef.current = null;
+          addMessage({ role: 'assistant', content: 'Okay, cancelled.' });
+          console.log('[Panel] → speakText [handleSend.voiceCreate.summary-no]');
+          speakText('Okay, cancelled.');
+          setTimeout(() => closePanel(), 1500);
+          return;
+        }
+        const clarify = "Sorry, I didn't catch that. Shall I save the job? Please say yes or no.";
+        addMessage({ role: 'assistant', content: clarify });
+        setTimeout(() => {
+          console.log('[Panel] → speakAndListen [handleSend.voiceCreate.summary-clarify]');
+          speakAndListen(clarify, 'yesno');
+        }, 400);
+        return;
+      }
+
+      // "Done" at any earlier step → skip the rest, jump to summary.
       if (/^(done|that'?s\s+(all|it)|save\s+(it|now)|create\s+(it|now))\b/i.test(trimmed)) {
-        await finishVoiceJobCreate(state);
+        goToSummaryStep(state);
         return;
       }
 
@@ -704,7 +848,10 @@ export default function AIAssistantPanel() {
         state.step = 'crew';
         const q = 'Which crew?';
         addMessage({ role: 'assistant', content: q });
-        speakAndListen(q, 'openended');
+        setTimeout(() => {
+          console.log('[Panel] → speakAndListen [handleSend.voiceCreate.crew-q]');
+          speakAndListen(q, 'openended');
+        }, 400);
         return;
       }
       if (state.step === 'crew') {
@@ -716,18 +863,25 @@ export default function AIAssistantPanel() {
         state.step = 'notes';
         const q = 'Any notes?';
         addMessage({ role: 'assistant', content: q });
-        speakAndListen(q, 'openended');
+        setTimeout(() => {
+          console.log('[Panel] → speakAndListen [handleSend.voiceCreate.notes-q]');
+          speakAndListen(q, 'openended');
+        }, 400);
         return;
       }
       if (state.step === 'notes') {
         if (!isSkip) state.collected.notes = trimmed;
-        await finishVoiceJobCreate(state);
+        goToSummaryStep(state);
         return;
       }
+      // Defensive bail: if state.step is somehow unrecognized, swallow the
+      // turn rather than fall through to parseSmartJobIntent and pop the form.
+      return;
     }
 
     // ── Smart-create follow-up: user is answering "anything else to add?" ───
-    if (smartCreateFollowupRef.current) {
+    // Voice sessions never reach the form-opening followup — gate it explicitly.
+    if (smartCreateFollowupRef.current && !voiceSessionActive) {
       const { prefill: pendingPrefill } = smartCreateFollowupRef.current;
       smartCreateFollowupRef.current = null;
 
@@ -735,6 +889,7 @@ export default function AIAssistantPanel() {
       if (/^(no|nothing|that'?s\s+it|skip|done|nope|nah|all\s+good)\.?\s*$/i.test(trimmed)) {
         const msg = 'Okay, opening the form.';
         addMessage({ role: 'assistant', content: msg });
+        console.log('[Panel] → speakText [handleSend.smartFollowup.negate]');
         speakText(msg);
         navigateToJobFormWithPrefill(pendingPrefill);
         return;
@@ -771,6 +926,7 @@ export default function AIAssistantPanel() {
           ? `${extracted.summary} Opening the form.`
           : 'Got it, opening the form.';
         addMessage({ role: 'assistant', content: summary });
+        console.log('[Panel] → speakText [handleSend.smartFollowup.parsed]');
         speakText(summary);
         navigateToJobFormWithPrefill(merged);
       } catch (err) {
@@ -786,7 +942,13 @@ export default function AIAssistantPanel() {
     // "New Job for Shamrock on Thursday" → resolve customer + date locally and
     // open the form. We only intercept when at least one hint is parseable;
     // a bare "new job" falls through to the existing voice-flow trigger.
-    if (!voiceFlow && !customerPicker) {
+    //
+    // Critical: voiceCreateStateRef.current must NOT be set here — otherwise a
+    // user's mid-flow answer that incidentally contains words like "roof" or
+    // "for" can re-trigger smart-create and pop the form. The voice-create
+    // intercept block above already returns, but we keep this guard as
+    // defense-in-depth so nothing interrupts an active voice job conversation.
+    if (!voiceFlow && !customerPicker && !voiceCreateStateRef.current) {
       const intent = parseSmartJobIntent(trimmed);
       if (intent && (intent.customer || intent.dayHint)) {
         await handleSmartCreateJob(intent);
@@ -837,12 +999,14 @@ export default function AIAssistantPanel() {
         const { flowType } = result.pendingAction.data || {};
         if (flowType && VOICE_FLOWS[flowType]) {
           addMessage({ role: 'assistant', content: result.message, isCommand: false });
+          console.log('[Panel] → speakText [handleSend.AI.start-voice-flow]');
           speakText(result.message);
           startVoiceFlow(flowType);
           // Give the spoken intro a moment, then ask first question with auto-listen
           setTimeout(() => {
             const firstQ = VOICE_FLOWS[flowType].steps[0].question;
             addMessage({ role: 'assistant', content: firstQ });
+            console.log('[Panel] → speakAndListen [handleSend.AI.first-question]');
             speakAndListen(firstQ, 'openended');
           }, 1800);
         }
@@ -861,8 +1025,10 @@ export default function AIAssistantPanel() {
         // Voice-tap session: speak the proposal then auto-listen for yes/no.
         // The Confirm/Cancel buttons stay visible as a fallback.
         awaitingPendingConfirmationRef.current = true;
+        console.log('[Panel] → speakAndListen [handleSend.AI.command-confirm]');
         speakAndListen(result.message, 'yesno');
       } else if (!isCommand) {
+        console.log('[Panel] → speakText [handleSend.AI.reply]');
         speakText(result.message);
       }
     } catch (err) {
@@ -883,7 +1049,7 @@ export default function AIAssistantPanel() {
     customerPicker, handleSmartCreateJob,
     activeJobs, crews, jobTypes,
     voiceSessionActive, localPending, navigateToJobFormWithPrefill,
-    finishVoiceJobCreate,
+    finishVoiceJobCreate, goToSummaryStep, closePanel,
   ]);
 
   // Auto-submit voice transcript when panel opens
@@ -905,6 +1071,7 @@ export default function AIAssistantPanel() {
     try {
       const result = await executeAction(action);
       addMessage({ role: 'assistant', content: result });
+      console.log('[Panel] → speakText [handleConfirm.action-result]');
       speakText(result);
     } catch (err) {
       addMessage({ role: 'assistant', content: `Action failed: ${err.message}` });
@@ -917,6 +1084,7 @@ export default function AIAssistantPanel() {
     setLocalPending(null);
     const msg = 'Action cancelled.';
     addMessage({ role: 'assistant', content: msg });
+    console.log('[Panel] → speakText [handleCancel.cancelled]');
     speakText(msg);
   }, [addMessage, speakText]);
 
@@ -939,16 +1107,19 @@ export default function AIAssistantPanel() {
   // Stable callback fed to memoized Bubble components — prevents the whole
   // conversation list from re-rendering each time a new message is appended.
   const handleSpeakContent = useCallback((content) => {
+    console.log('[Panel] → speakText [handleSpeakContent.bubble-tap]');
     speakText(content);
   }, [speakText]);
 
-  // iOS keyboard dictation fires onChangeText twice when dictation ends — once with
-  // the dictated text, and again after React reconciles the controlled value, producing
-  // a doubled string (e.g. "Create New Job Create New Job"). Track the last value and
-  // drop the second event when it matches the doubling pattern.
+  // iOS keyboard dictation fires onChangeText twice when dictation ends — once
+  // with the dictated text, and again after React reconciles the controlled
+  // value, producing a doubled string. iOS inserts a single space between the
+  // two copies, so the real shape is "X X" not "XX" — match both so the guard
+  // actually catches it (the no-space variant was never observed in practice
+  // but is kept as a safety net for any future iOS variant).
   const handleChangeText = useCallback((text) => {
     const prev = lastTextRef.current;
-    if (prev.length > 0 && text === prev + prev) return;
+    if (prev.length > 0 && (text === prev + prev || text === prev + ' ' + prev)) return;
     lastTextRef.current = text;
     setTextInput(text);
   }, []);

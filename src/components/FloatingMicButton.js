@@ -37,6 +37,9 @@ const SPEECH_HTML = `<!DOCTYPE html>
 var recognition = null;
 var finalTranscript = '';
 var active = false;
+// One-shot per session: prevents the same result from being emitted twice
+// when iOS fires 'end' twice OR when stopRecognition is injected after onend.
+var endNotified = false;
 
 function notify(obj) {
   try { window.ReactNativeWebView.postMessage(JSON.stringify(obj)); } catch(e) {}
@@ -48,6 +51,9 @@ function startRecognition(isAuto) {
   if (!SR) { notify({type:'error', error:'not_supported'}); return; }
   finalTranscript = '';
   active = true;
+  // Reset the one-shot end-notification guard so this session can emit its
+  // result exactly once via the first onend / stopRecognition path that fires.
+  endNotified = false;
   recognition = new SR();
   recognition.continuous = !isAuto;
   recognition.interimResults = true; // always on; auto mode uses it for interim_started detection
@@ -74,6 +80,12 @@ function startRecognition(isAuto) {
     notify({type:'error', error: e.error || 'recognition_error'});
   };
   recognition.onend = function() {
+    // iOS WebKit's SpeechRecognition can fire 'end' more than once for a single
+    // session (especially when stop() is called inside onresult). The guard
+    // ensures we emit a single result message per session — without it the
+    // panel sees the same transcript twice and submits the message twice.
+    if (endNotified) return;
+    endNotified = true;
     active = false;
     recognition = null;
     notify({type:'result', text: finalTranscript.trim()});
@@ -90,10 +102,18 @@ function startRecognition(isAuto) {
 
 function stopRecognition() {
   if (recognition && active) {
+    // Active session — recognition.stop() will trigger onend, which notifies.
     recognition.stop();
-  } else {
+  } else if (!endNotified) {
+    // Recognition already ended (or never started) AND no result has been
+    // notified yet for this session. Notify the cached transcript exactly once.
+    endNotified = true;
     notify({type:'result', text: finalTranscript.trim()});
   }
+  // else: result already notified for this session — drop the redundant stop.
+  // Without this guard, closePanel -> injectJavaScript('stopRecognition()')
+  // fires immediately after a normal onend and emits the same transcript again,
+  // duplicating the user's message in the conversation.
 }
 
 window.addEventListener('message', function(e) {

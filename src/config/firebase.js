@@ -5,6 +5,7 @@ import {
   persistentSingleTabManager, getFirestore,
 } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
+import { getFunctions } from 'firebase/functions';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const firebaseConfig = {
@@ -33,3 +34,7 @@ try {
 export { db };
 
 export const storage = getStorage(app);
+
+// us-central1 — same region as our deployed functions (sendInvoiceEmail,
+// roofEstimator, scheduled jobs). httpsCallable resolves to /us-central1.
+export const functions = getFunctions(app);

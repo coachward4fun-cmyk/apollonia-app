@@ -431,7 +431,9 @@ export default function DashboardScreen() {
         </TouchableOpacity>
 
         {/* Crew Jobs This Week — per-crew breakdown of jobs in the current Fri→Thu pay week */}
-        <SectionLabel title="Crew Jobs This Week" />
+        <SectionLabel
+          title={`Crew Jobs This Week  ${weekStart.slice(5).replace('-', '/')}–${weekEnd.slice(5).replace('-', '/')}`}
+        />
         {crewWeekStats.length === 0 ? (
           <View style={styles.crewWeekEmpty}>
             <Text style={styles.crewWeekEmptyText}>No jobs scheduled this week</Text>
@@ -520,36 +522,38 @@ export default function DashboardScreen() {
         </View>
 
         {/* Reports — moved here from Admin so they're one tap from the dashboard. */}
+        {/* fromDashboard: true makes the report screen's back button return to
+            Dashboard instead of the Admin/SettingsList stack root. */}
         <SectionLabel title="Reports" />
         <View style={styles.reportsCard}>
           <ReportRow
             icon="stats-chart-outline"
             label="Financials"
-            onPress={() => navigation.navigate('Admin', { screen: 'Financials' })}
+            onPress={() => navigation.navigate('Admin', { screen: 'Financials', params: { fromDashboard: true } })}
           />
           <View style={styles.reportsDivider} />
           <ReportRow
             icon="bar-chart-outline"
             label="Revenue YTD"
-            onPress={() => navigation.navigate('Admin', { screen: 'RevenueYTD' })}
+            onPress={() => navigation.navigate('Admin', { screen: 'RevenueYTD', params: { fromDashboard: true } })}
           />
           <View style={styles.reportsDivider} />
           <ReportRow
             icon="people-outline"
             label="Crew Pay YTD"
-            onPress={() => navigation.navigate('Admin', { screen: 'CrewPayYTD' })}
+            onPress={() => navigation.navigate('Admin', { screen: 'CrewPayYTD', params: { fromDashboard: true } })}
           />
           <View style={styles.reportsDivider} />
           <ReportRow
             icon="wallet-outline"
             label="Expenses YTD"
-            onPress={() => navigation.navigate('Admin', { screen: 'ExpensesYTD' })}
+            onPress={() => navigation.navigate('Admin', { screen: 'ExpensesYTD', params: { fromDashboard: true } })}
           />
           <View style={styles.reportsDivider} />
           <ReportRow
             icon="time-outline"
             label="Activity Log"
-            onPress={() => navigation.navigate('Admin', { screen: 'ActivityLog' })}
+            onPress={() => navigation.navigate('Admin', { screen: 'ActivityLog', params: { fromDashboard: true } })}
           />
         </View>
 
@@ -589,14 +593,14 @@ function PipelineBox({ label, value, accent, onPress, disabled }) {
     return (
       <View style={[styles.pipelineBox, styles.boxInactive]}>
         <Text style={[styles.pipelineValue, styles.boxInactiveValue]}>0</Text>
-        <Text style={[styles.pipelineLabel, styles.boxInactiveLabel]}>{label}</Text>
+        <Text style={[styles.pipelineLabel, styles.boxInactiveLabel]} numberOfLines={1} adjustsFontSizeToFit>{label}</Text>
       </View>
     );
   }
   return (
     <TouchableOpacity style={styles.pipelineBox} onPress={onPress} activeOpacity={0.72}>
       <Text style={[styles.pipelineValue, { color: accent }]}>{value}</Text>
-      <Text style={styles.pipelineLabel}>{label}</Text>
+      <Text style={styles.pipelineLabel} numberOfLines={1} adjustsFontSizeToFit>{label}</Text>
     </TouchableOpacity>
   );
 }
@@ -936,7 +940,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 12,
     paddingVertical: 8,
-    paddingHorizontal: 10,
+    paddingHorizontal: 4,
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -945,7 +949,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   pipelineValue: { fontSize: 28, fontWeight: '800' },
-  pipelineLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 2, textAlign: 'center', fontWeight: '500' },
+  pipelineLabel: { fontSize: 10, color: colors.textSecondary, marginTop: 2, textAlign: 'center', fontWeight: '500', alignSelf: 'stretch' },
 
   boxInactive: {
     backgroundColor: '#f9fafb',

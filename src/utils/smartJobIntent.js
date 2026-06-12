@@ -41,12 +41,21 @@ export function parseSmartJobIntent(text) {
   return { typeHint, customer, dayHint };
 }
 
+// Default list used when the live jobTypes haven't loaded yet (Firestore round-
+// trip can take ~500 ms). Mirrors FALLBACK_JOB_TYPES in JobFormScreen so the AI
+// matcher and the form pickers agree on baseline coverage.
+export const FALLBACK_JOB_TYPES = ['Roofing', 'Gutters', 'Siding', 'Concrete', 'Painting'];
+
 export function matchJobType(hint, jobTypes) {
   if (!hint) return null;
   const h = hint.toLowerCase().trim();
-  const names = (jobTypes || [])
+  let names = (jobTypes || [])
     .map((t) => (typeof t === 'string' ? t : t?.name))
     .filter(Boolean);
+  // Fallback: when the live list is empty (Firestore still loading on cold
+  // start), use the same defaults the form does. Without this, smart-intent
+  // misses "roofing" / "gutters" / etc. for the first second after launch.
+  if (names.length === 0) names = [...FALLBACK_JOB_TYPES];
   const exact      = names.find((n) => n.toLowerCase() === h);
   if (exact) return exact;
   const startsWith = names.find((n) => n.toLowerCase().startsWith(h));

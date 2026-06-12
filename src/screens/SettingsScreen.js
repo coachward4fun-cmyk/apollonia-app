@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,9 @@ import {
   ActivityIndicator,
   Modal,
   TextInput,
+  Linking,
 } from 'react-native';
+import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -20,9 +22,10 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   getJobs, getCrews, getExpenses, getCustomers,
   importBackup, deleteJob, deleteExpense, saveJob, saveEmailConfig,
+  deleteCustomerById, getBuildInfo, subscribeUsers, clearActivityLog,
 } from '../services/db';
 import { useAppData } from '../context/AppDataContext';
-import { deleteStoragePhoto, jobPhotoPath, expensePhotoPath, testStorageConnection } from '../services/storageService';
+import { deleteStoragePhoto, storagePathFromUrl, testStorageConnection } from '../services/storageService';
 import { SkeletonCard } from '../components/SkeletonLoader';
 import { logActivity } from '../services/activityLog';
 import { useAuth } from '../context/AuthContext';
@@ -30,8 +33,6 @@ import { colors } from '../theme/colors';
 import { useBuildExpiry, formatExpiryDate, calcDaysLeft, daysColor } from '../hooks/useBuildExpiry';
 import { auth, storage } from '../config/firebase';
 import { ref, listAll, getMetadata } from 'firebase/storage';
-
-const BUILD_COUNT_KEY = 'apollonia:build_count';
 
 function validate(data) {
   if (!data || typeof data !== 'object') throw new Error('Invalid JSON — expected an object at root.');
@@ -98,24 +99,47 @@ function formatSize(bytes) {
   return Math.max(1, Math.round(bytes / 1024)) + ' KB';
 }
 
-async function fetchPhotoStorageBytes() {
+// Walks the photo Storage tree once. Sums file sizes for the report's
+// "Photos" size column AND counts files whose parent `jobs/{jobId}/` prefix
+// has no matching job document — surfaced as the report's "Orphaned Photos"
+// row so a glance shows whether cleanup is needed.
+async function fetchPhotoStorageStats(validJobIds) {
   let totalBytes = 0;
-  for (const prefix of ['jobs', 'expenses']) {
-    const prefixRef = ref(storage, prefix);
-    const topResult = await listAll(prefixRef);
-    for (const folderRef of topResult.prefixes) {
-      const folderResult = await listAll(folderRef);
-      for (const itemRef of folderResult.items) {
-        try {
-          const meta = await getMetadata(itemRef);
-          totalBytes += meta.size || 0;
-        } catch (err) {
-          console.warn('[Storage] getMetadata error for', itemRef.fullPath, ':', err.message);
-        }
+  let orphanedFileCount = 0;
+
+  // jobs/ — both bytes AND orphan-file counting.
+  const jobsPrefix = ref(storage, 'jobs');
+  const jobsTop    = await listAll(jobsPrefix);
+  for (const folderRef of jobsTop.prefixes) {
+    const folderResult = await listAll(folderRef);
+    const isOrphan     = !validJobIds.has(folderRef.name);
+    for (const itemRef of folderResult.items) {
+      try {
+        const meta = await getMetadata(itemRef);
+        totalBytes += meta.size || 0;
+      } catch (err) {
+        console.warn('[Storage] getMetadata error for', itemRef.fullPath, ':', err.message);
+      }
+      if (isOrphan) orphanedFileCount++;
+    }
+  }
+
+  // expenses/ — bytes only (orphan check not in scope for the cleanup tool).
+  const expensesPrefix = ref(storage, 'expenses');
+  const expensesTop    = await listAll(expensesPrefix);
+  for (const folderRef of expensesTop.prefixes) {
+    const folderResult = await listAll(folderRef);
+    for (const itemRef of folderResult.items) {
+      try {
+        const meta = await getMetadata(itemRef);
+        totalBytes += meta.size || 0;
+      } catch (err) {
+        console.warn('[Storage] getMetadata error for', itemRef.fullPath, ':', err.message);
       }
     }
   }
-  return totalBytes;
+
+  return { totalBytes, orphanedFileCount };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -126,9 +150,17 @@ export default function SettingsScreen() {
   const { emailConfig, refreshEmailConfig } = useAppData();
   const [importing,       setImporting]       = useState(false);
   const [buildVersion,    setBuildVersion]    = useState('');
+  const [buildInfo,       setBuildInfo]       = useState(null);
+  const [buildUsers,      setBuildUsers]      = useState([]);
   const [showSupport,     setShowSupport]     = useState(false);
   const [storageLoading,  setStorageLoading]  = useState(null);
   const [diagLoading,     setDiagLoading]     = useState(false);
+
+  // Orphan-data cleanup state
+  const [showOrphanModal, setShowOrphanModal] = useState(false);
+  const [orphanScanning,  setOrphanScanning]  = useState(false);
+  const [orphanResults,   setOrphanResults]   = useState(null); // { jobs, customers, photos } | null
+  const [orphanDeleting,  setOrphanDeleting]  = useState(false);
 
   const [jobs,      setJobs]      = useState([]);
   const [crews,     setCrews]     = useState([]);
@@ -141,39 +173,120 @@ export default function SettingsScreen() {
   const [photoStorageLoading,  setPhotoStorageLoading]  = useState(true);
   const [photoStorageError,    setPhotoStorageError]    = useState(false);
   const [summaryLoading,       setSummaryLoading]       = useState(true);
+  const [orphanedPhotoCount,   setOrphanedPhotoCount]   = useState(null);
 
-  useEffect(() => {
-    Promise.all([
-      getJobs().then(setJobs).catch(() => {}),
-      getCrews().then(setCrews).catch(() => {}),
-      getExpenses().then(setExpenses).catch(() => {}),
-      getCustomers().then(setCustomers).catch(() => {}),
-    ]).finally(() => setSummaryLoading(false));
+  // Single refresh path used by the mount effect AND by executeOrphanCleanup
+  // (post-delete) so the report numbers stay in sync with Firestore + Storage
+  // without forcing a navigation roundtrip.
+  const refreshSummary = useCallback(async () => {
+    setSummaryLoading(true);
+    setPhotoStorageLoading(true);
+    setPhotoStorageError(false);
+    let freshJobs = [];
+    let freshCustomers = [];
+    let orphanedFileCount = null;
+    try {
+      let freshCrews, freshExpenses;
+      [freshJobs, freshCrews, freshExpenses, freshCustomers] = await Promise.all([
+        getJobs(),
+        getCrews(),
+        getExpenses(),
+        getCustomers(),
+      ]);
+      setJobs(freshJobs);
+      setCrews(freshCrews);
+      setExpenses(freshExpenses);
+      setCustomers(freshCustomers);
+
+      // Storage walk uses the freshly-loaded job ids so the orphan count
+      // reflects post-cleanup state.
+      const jobIdSet = new Set(freshJobs.map((j) => j.id));
+      try {
+        const stats = await fetchPhotoStorageStats(jobIdSet);
+        setPhotoStorageBytes(stats.totalBytes);
+        setOrphanedPhotoCount(stats.orphanedFileCount);
+        orphanedFileCount = stats.orphanedFileCount;
+      } catch (err) {
+        console.error('[Storage] photo stats fetch failed:', err.message);
+        setPhotoStorageError(true);
+        setPhotoStorageBytes(null);
+        setOrphanedPhotoCount(null);
+      }
+    } catch (err) {
+      console.warn('[SettingsScreen] refreshSummary failed:', err.message);
+    } finally {
+      setSummaryLoading(false);
+      setPhotoStorageLoading(false);
+    }
+    // Return fresh data so callers (executeOrphanCleanup) can verify cleanup
+    // without waiting for the React state setters above to flush — those won't
+    // settle until the next render, so reading `jobs` / `customers` directly
+    // immediately after this would still see stale arrays.
+    return { freshJobs, freshCustomers, orphanedFileCount };
   }, []);
 
+  useEffect(() => { refreshSummary(); }, [refreshSummary]);
+
+  // Version shown to the user is this binary's own version + build number, from
+  // app.json (baked in at build time) — consistent on every device of the same
+  // build. The published build (meta/buildInfo) + user list power the admin view.
   const loadBuildVersion = useCallback(async () => {
-    const raw   = await AsyncStorage.getItem(BUILD_COUNT_KEY);
-    const count = parseInt(raw || '0', 10) + 1;
-    await AsyncStorage.setItem(BUILD_COUNT_KEY, String(count));
-    const date   = new Date().toISOString().slice(0, 10);
-    const padded = String(count).padStart(3, '0');
-    setBuildVersion(`${date}+${padded}`);
+    const v  = Constants.expoConfig?.version || '1.0.0';
+    const bn = Constants.expoConfig?.ios?.buildNumber || '?';
+    setBuildVersion(`Version ${v} (Build ${bn})`);
+    try {
+      const info = await getBuildInfo();
+      setBuildInfo(info);
+    } catch (err) {
+      console.warn('[settings] loadBuildVersion failed:', err?.message || err);
+    }
   }, []);
 
   useEffect(() => { loadBuildVersion(); }, [loadBuildVersion]);
 
+  // Real-time users listener powers the USER BUILD VERSIONS list. onSnapshot
+  // fires immediately with current data, then again the instant buildUpdate.js
+  // (App.js launch) writes each user's currentBuildId/currentBuildNumber — so the
+  // list updates live with no timer guessing.
   useEffect(() => {
-    setPhotoStorageLoading(true);
-    setPhotoStorageError(false);
-    fetchPhotoStorageBytes()
-      .then((bytes) => setPhotoStorageBytes(bytes))
-      .catch((err) => {
-        console.error('[Storage] photo size fetch failed:', err.message);
-        setPhotoStorageError(true);
-        setPhotoStorageBytes(null);
-      })
-      .finally(() => setPhotoStorageLoading(false));
+    const unsub = subscribeUsers(setBuildUsers);
+    return () => unsub();
   }, []);
+
+  // The latest published build number — anyone on a lower one "Needs Update".
+  const publishedBuildNumber = parseInt(buildInfo?.buildNumber, 10) || 0;
+  // Only show claimed team members (Scott, Kleodian, Mary) — anonymous-auth
+  // shells have no name and would otherwise flood the list with raw UIDs.
+  const namedBuildUsers = buildUsers.filter((u) => u.name && String(u.name).trim());
+  const updateInstallUrl = buildInfo?.installUrl
+    || (buildInfo?.buildId ? `https://expo.dev/accounts/coachward/projects/apollonia/builds/${buildInfo.buildId}` : null);
+
+  // CHANGE 8 — tapping an out-of-date user texts them the install link.
+  const nudgeUserToUpdate = useCallback((u) => {
+    const phone = String(u?.mobile || u?.phone || '').trim();
+    if (!phone) {
+      Alert.alert('No phone number', `No phone number on file for ${u?.name || 'this user'}.`);
+      return;
+    }
+    const body = `A new version of Apollonia is available. Install it here: ${updateInstallUrl || ''}`;
+    const url  = `sms:${phone}&body=${encodeURIComponent(body)}`;
+    Linking.openURL(url).catch((err) =>
+      console.warn('[settings] open SMS failed:', err?.message || err),
+    );
+  }, [updateInstallUrl]);
+
+  // Same criterion as runOrphanScan CHECK 1 — recomputed on every render so
+  // the DATA SUMMARY card stays in sync the moment cleanup refreshes `jobs`
+  // and `customers`.
+  const orphanedJobCount = useMemo(() => {
+    const customerNameSet = new Set(
+      customers.map((c) => (c.name || '').trim()).filter(Boolean),
+    );
+    return jobs.filter((j) => {
+      const n = (j.billToName || '').trim();
+      return n && !customerNameSet.has(n);
+    }).length;
+  }, [jobs, customers]);
 
   const summary = {
     jobs:      jobs.length,
@@ -273,6 +386,49 @@ export default function SettingsScreen() {
     );
   };
 
+  // Clear Activity Log — performs the delete after the user confirms a cutoff.
+  // cutoffDate: JS Date (delete entries before it) or null (delete everything).
+  const performClearActivityLog = async (cutoffDate) => {
+    try {
+      setStorageLoading('activityLog');
+      const n = await clearActivityLog(cutoffDate);
+      setStorageLoading(null);
+      Alert.alert('Activity log cleared.', `Removed ${n} ${n === 1 ? 'entry' : 'entries'}.`);
+    } catch (err) {
+      setStorageLoading(null);
+      Alert.alert('Error', err?.message || 'Could not clear the activity log.');
+    }
+  };
+
+  const confirmClearActivityLog = (cutoffDate) => {
+    const message = cutoffDate
+      ? `Delete all activity log entries before ${cutoffDate.toLocaleDateString()}? This cannot be undone.`
+      : 'Delete ALL activity log entries? This cannot be undone.';
+    Alert.alert('Clear Activity Log', message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => performClearActivityLog(cutoffDate) },
+    ]);
+  };
+
+  const handleClearActivityLog = () => {
+    const daysAgo = (n) => {
+      const d = new Date();
+      d.setDate(d.getDate() - n);
+      d.setHours(0, 0, 0, 0);
+      return d;
+    };
+    Alert.alert(
+      'Clear Activity Log',
+      'Choose how much history to remove. The selected recent window is kept.',
+      [
+        { text: 'Last 30 days', onPress: () => confirmClearActivityLog(daysAgo(30)) },
+        { text: 'Last 7 days',  onPress: () => confirmClearActivityLog(daysAgo(7)) },
+        { text: 'Clear all', style: 'destructive', onPress: () => confirmClearActivityLog(null) },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
   // Remove photos from paid jobs in Firebase Storage
   const handleRemovePaidJobPhotos = async () => {
     try {
@@ -307,11 +463,13 @@ export default function SettingsScreen() {
               setStorageLoading('photos');
               try {
                 for (const job of paidJobs) {
-                  for (const url of (job.photos || [])) {
-                    const filename = url.split('/').pop().split('?')[0];
-                    await deleteStoragePhoto(jobPhotoPath(job.id, filename));
+                  for (const entry of (job.photos || [])) {
+                    const url = typeof entry === 'string' ? entry : (entry?.uri || '');
+                    if (!url) continue;
+                    const path = storagePathFromUrl(url);
+                    if (path) await deleteStoragePhoto(path);
                   }
-                  await saveJob({ ...job, photos: [] });
+                  await saveJob({ ...job, photos: [], photoCount: 0 });
                 }
                 setStorageLoading(null);
                 Alert.alert('Done', `Removed photos from ${paidJobs.length} paid job(s).`);
@@ -367,9 +525,19 @@ export default function SettingsScreen() {
               setStorageLoading('jobs');
               try {
                 for (const job of paidJobs) {
-                  for (const url of (job.photos || [])) {
-                    const filename = url.split('/').pop().split('?')[0];
-                    await deleteStoragePhoto(jobPhotoPath(job.id, filename));
+                  for (const entry of (job.photos || [])) {
+                    // Photo entries are either legacy bare-URL strings or the
+                    // newer { uri, label?, createdAt? } object shape. Normalize
+                    // first so `.split` can't be called on an object.
+                    const url = typeof entry === 'string' ? entry : (entry?.uri || '');
+                    if (!url) continue;
+                    // storagePathFromUrl correctly decodes the URL-encoded
+                    // Firebase Storage path (`jobs%2F.../...jpg` → `jobs/.../...jpg`).
+                    // The old `url.split('/').pop()` returned the encoded full
+                    // path and the constructed delete target never matched
+                    // anything in Storage.
+                    const path = storagePathFromUrl(url);
+                    if (path) await deleteStoragePhoto(path);
                   }
                   await deleteJob(job.id);
                 }
@@ -424,9 +592,11 @@ export default function SettingsScreen() {
               setStorageLoading('expenses');
               try {
                 for (const exp of expenses) {
-                  for (const url of (exp.photos || [])) {
-                    const filename = url.split('/').pop().split('?')[0];
-                    await deleteStoragePhoto(expensePhotoPath(exp.id, filename));
+                  for (const entry of (exp.photos || [])) {
+                    const url = typeof entry === 'string' ? entry : (entry?.uri || '');
+                    if (!url) continue;
+                    const path = storagePathFromUrl(url);
+                    if (path) await deleteStoragePhoto(path);
                   }
                   await deleteExpense(exp.id);
                 }
@@ -444,6 +614,216 @@ export default function SettingsScreen() {
       setStorageLoading(null);
       Alert.alert('Export Failed', err.message || 'Could not export expense data.');
     }
+  };
+
+  // ── Orphan-data cleanup ─────────────────────────────────────────────────────
+  //
+  // Three independent checks, then a single review modal where the user can
+  // commit to deleting everything that was found. Scanning is read-only;
+  // nothing is removed until the user taps Delete All and confirms.
+
+  const runOrphanScan = async () => {
+    const [jobs, customers] = await Promise.all([getJobs(), getCustomers()]);
+
+    // CHECK 1 — Jobs whose billToName doesn't match any customer in Firestore.
+    const customerNameSet = new Set(
+      customers.map((c) => (c.name || '').trim()).filter(Boolean),
+    );
+    const orphanedJobs = jobs
+      .filter((j) => {
+        const n = (j.billToName || '').trim();
+        return n && !customerNameSet.has(n);
+      })
+      .map((j) => ({
+        id:          j.id,
+        projectName: j.projectName || 'Untitled',
+        targetDate:  j.targetDate || '',
+        billToName:  j.billToName || '',
+        // Capture photo URLs so the delete pass can clean Storage too.
+        photoUrls: (j.photos || [])
+          .map((p) => (typeof p === 'string' ? p : (p?.uri || '')))
+          .filter(Boolean),
+        invoicePdfUrl: j.invoicePdfUrl || '',
+      }));
+
+    // CHECK 2 — Customers with no name, OR a name with no jobs referencing
+    // them via billToName. Invoices live as fields on the job docs, so the
+    // billToName check covers "no invoices for this customer" too.
+    const jobBillNameSet = new Set(
+      jobs.map((j) => (j.billToName || '').trim()).filter(Boolean),
+    );
+    const orphanedCustomers = customers
+      .filter((c) => {
+        const n = (c.name || '').trim();
+        if (!n) return true;
+        return !jobBillNameSet.has(n);
+      })
+      .map((c) => ({
+        id:      c.id,
+        name:    c.name || '',
+        email:   c.email || '',
+        address: c.address || '',
+        phone:   c.phone || '',
+      }));
+
+    // CHECK 3 — Storage prefixes under jobs/ that don't have a matching job doc.
+    const jobIdSet = new Set(jobs.map((j) => j.id));
+    const jobsPrefixRef = ref(storage, 'jobs');
+    const topResult = await listAll(jobsPrefixRef);
+    const orphanedPhotos = [];
+    for (const folderRef of topResult.prefixes) {
+      // folderRef.name is the {jobId} segment under jobs/.
+      if (jobIdSet.has(folderRef.name)) continue;
+      const folderResult = await listAll(folderRef);
+      const paths = folderResult.items.map((itemRef) => itemRef.fullPath);
+      if (paths.length === 0) continue;
+      orphanedPhotos.push({
+        jobId:     folderRef.name,
+        fileCount: paths.length,
+        paths,
+      });
+    }
+
+    return { jobs: orphanedJobs, customers: orphanedCustomers, photos: orphanedPhotos };
+  };
+
+  const handleOrphanCleanup = async () => {
+    setStorageLoading('orphans');
+    setOrphanResults(null);
+    setOrphanScanning(true);
+    setShowOrphanModal(true);
+    try {
+      const results = await runOrphanScan();
+      const total = results.jobs.length + results.customers.length + results.photos.length;
+      if (total === 0) {
+        setShowOrphanModal(false);
+        // Re-sync the Data Summary card with the moment-of-scan Firestore
+        // snapshot. Without this, a clean scan leaves the Summary's React
+        // state showing whatever was loaded on mount, which may be stale.
+        try { await refreshSummary(); } catch (refreshErr) {
+          console.warn('[OrphanCleanup] refreshSummary after clean scan failed:', refreshErr?.message);
+        }
+        Alert.alert('All Clean', 'No orphaned data found ✓');
+        return;
+      }
+      setOrphanResults(results);
+    } catch (err) {
+      setShowOrphanModal(false);
+      Alert.alert('Scan Failed', err.message || 'Could not check for orphaned data.');
+    } finally {
+      setOrphanScanning(false);
+      setStorageLoading(null);
+    }
+  };
+
+  const executeOrphanCleanup = async () => {
+    if (!orphanResults) return;
+    setOrphanDeleting(true);
+    // Track storage delete failures across all three paths. deleteStoragePhoto
+    // returns { ok, error? } and never throws — so inspecting the result is
+    // the only way to know whether the file actually went away. The Firestore
+    // calls (deleteJob / deleteCustomerById) do throw, so they continue to
+    // bubble to the outer try/catch.
+    let storageFailures = 0;
+    const tally = (result) => {
+      if (result && result.ok === false) {
+        storageFailures++;
+        console.warn('[OrphanCleanup] storage delete failed:', result.error);
+      }
+    };
+
+    try {
+      // Orphan jobs: drop their Storage photos first (best-effort), then the doc.
+      const jobPromises = orphanResults.jobs.map(async (j) => {
+        for (const url of j.photoUrls) {
+          const path = storagePathFromUrl(url);
+          if (path) tally(await deleteStoragePhoto(path));
+        }
+        if (j.invoicePdfUrl) {
+          const pdfPath = storagePathFromUrl(j.invoicePdfUrl);
+          if (pdfPath) tally(await deleteStoragePhoto(pdfPath));
+        }
+        await deleteJob(j.id);
+      });
+
+      // Orphan customers: deleteCustomerById is safe whether the doc has a name or not.
+      const customerPromises = orphanResults.customers.map((c) => deleteCustomerById(c.id));
+
+      // Orphan storage prefixes: each path is already known from the scan.
+      const photoPromises = orphanResults.photos.flatMap((p) =>
+        p.paths.map(async (path) => { tally(await deleteStoragePhoto(path)); }),
+      );
+
+      await Promise.all([...jobPromises, ...customerPromises, ...photoPromises]);
+
+      const total =
+        orphanResults.jobs.length +
+        orphanResults.customers.length +
+        orphanResults.photos.length;
+      try { logActivity('orphan_cleanup', `Cleaned up ${total} orphaned item(s)${storageFailures > 0 ? `, ${storageFailures} storage failure(s)` : ''}`); } catch {}
+
+      setShowOrphanModal(false);
+      setOrphanResults(null);
+
+      // Refresh report numbers so the user sees the post-cleanup state
+      // without navigating away. Awaited so the success alert lands on top of
+      // the fresh data (otherwise the user may briefly see stale numbers).
+      // We also use the returned fresh arrays to verify cleanup — the setJobs
+      // / setCustomers state updates inside refreshSummary won't be visible
+      // until the next render, so reading the local `jobs` / `customers`
+      // variables here would still see pre-cleanup data.
+      let postJobs = null;
+      let postCustomers = null;
+      let postOrphanedPhotos = null;
+      try {
+        const result = await refreshSummary();
+        postJobs           = result?.freshJobs ?? null;
+        postCustomers      = result?.freshCustomers ?? null;
+        postOrphanedPhotos = result?.orphanedFileCount ?? null;
+      } catch (refreshErr) {
+        console.warn('[OrphanCleanup] refreshSummary failed:', refreshErr?.message);
+      }
+
+      // Compute the orphan counts directly from the fresh data so we can log
+      // post-cleanup state for diagnostics. The numbers should all be zero
+      // when cleanup succeeded; anything non-zero indicates a delete failure
+      // somewhere upstream that the user should know about.
+      if (postJobs && postCustomers) {
+        const postCustomerNames = new Set(postCustomers.map((c) => (c.name || '').trim()).filter(Boolean));
+        const postOrphanedJobs  = postJobs.filter((j) => {
+          const n = (j.billToName || '').trim();
+          return n && !postCustomerNames.has(n);
+        }).length;
+        console.log('[OrphanCleanup] post-cleanup orphaned jobs:', postOrphanedJobs);
+        console.log('[OrphanCleanup] post-cleanup orphaned photos:', postOrphanedPhotos);
+      }
+
+      const baseMsg    = `Deleted ${total} orphaned item${total === 1 ? '' : 's'}.`;
+      const failureMsg = storageFailures > 0
+        ? ` ${storageFailures} storage file${storageFailures === 1 ? '' : 's'} could not be removed — check Firebase Storage rules.`
+        : '';
+      Alert.alert('Cleanup Complete', baseMsg + failureMsg);
+    } catch (err) {
+      Alert.alert('Cleanup Failed', err.message || 'Could not delete orphaned data.');
+    } finally {
+      setOrphanDeleting(false);
+    }
+  };
+
+  const confirmOrphanDelete = () => {
+    if (!orphanResults) return;
+    const total =
+      orphanResults.jobs.length +
+      orphanResults.customers.length +
+      orphanResults.photos.length;
+    Alert.alert(
+      'Delete All',
+      `Permanently delete ${total} orphaned item${total === 1 ? '' : 's'}? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: executeOrphanCleanup },
+      ],
+    );
   };
 
   return (
@@ -518,6 +898,20 @@ export default function SettingsScreen() {
               <DataRow icon="wallet-outline"        label="Expenses"  value={summary.expenses}  size={formatSize(sizes.expenses)}  onPress={() => navigation.navigate('Expenses')} divider />
               <DataRow icon="image-outline"         label="Photos"    value={summary.photos}    size={photoStorageLoading ? '…' : photoStorageError ? 'Unable to calculate' : sizes.photos == null ? '—' : formatSize(sizes.photos)} divider />
               <DataRow icon="person-circle-outline" label="Customers" value={summary.customers} size={formatSize(sizes.customers)} onPress={() => navigation.navigate('CustomerList')} divider />
+              <DataRow
+                icon="alert-circle-outline"
+                label="Orphaned Jobs"
+                value={orphanedJobCount}
+                tint={orphanedJobCount > 0 ? '#dc2626' : undefined}
+                divider
+              />
+              <DataRow
+                icon="image-outline"
+                label="Orphaned Photos"
+                value={photoStorageLoading ? '…' : (orphanedPhotoCount ?? '—')}
+                tint={(orphanedPhotoCount ?? 0) > 0 ? '#dc2626' : undefined}
+                divider
+              />
               <View style={styles.rowDivider} />
               <View style={styles.totalRow}>
                 <Text style={styles.totalLabel}>TOTAL</Text>
@@ -551,6 +945,22 @@ export default function SettingsScreen() {
             color="#2563eb"
             loading={storageLoading === 'expenses'}
             onPress={handleExportExpenseData}
+          />
+          <View style={styles.rowDivider} />
+          <StorageAction
+            icon="trash-bin-outline"
+            label="Clean Up Orphaned Data"
+            color="#dc2626"
+            loading={storageLoading === 'orphans'}
+            onPress={handleOrphanCleanup}
+          />
+          <View style={styles.rowDivider} />
+          <StorageAction
+            icon="time-outline"
+            label="Clear Activity Log"
+            color="#d97706"
+            loading={storageLoading === 'activityLog'}
+            onPress={handleClearActivityLog}
           />
         </View>
 
@@ -586,6 +996,65 @@ export default function SettingsScreen() {
             label="Updated By"
             value={buildExpiry.loading ? 'Loading…' : (buildExpiry.updatedBy ?? '—')}
           />
+          <View style={styles.rowDivider} />
+          <BuildInfoRow
+            label="Latest Published"
+            value={buildInfo
+              ? `${buildInfo.version || '?'} (Build ${buildInfo.buildNumber || '?'})`
+              : 'None published yet'}
+          />
+        </View>
+
+        <Text style={styles.sectionLabel}>USER BUILD VERSIONS</Text>
+        <View style={styles.card}>
+          {namedBuildUsers.length === 0 ? (
+            <View style={styles.dataRow}>
+              <Text style={styles.dataRowLabel}>No claimed users yet</Text>
+            </View>
+          ) : (
+            namedBuildUsers.map((u, idx) => {
+              const userBN = parseInt(u.currentBuildNumber, 10) || 0;
+              // With nothing published we can't judge — treat everyone as current.
+              const isCurrent = publishedBuildNumber === 0 ? true : userBN >= publishedBuildNumber;
+              const buildLabel = userBN > 0
+                ? `Version ${u.currentVersion || '—'} (Build ${userBN})`
+                : 'No build recorded';
+              const name = String(u.name).trim();
+              return (
+                <View key={u.id || idx}>
+                  {idx > 0 ? <View style={styles.rowDivider} /> : null}
+                  {/* Tapping anywhere on the row opens the editor (name, mobile,
+                      notifications) — same fields as User Setup. The chat icon on
+                      out-of-date rows still texts them the install link. */}
+                  <TouchableOpacity
+                    activeOpacity={0.7}
+                    onPress={() => navigation.navigate('EditUser', { userId: u.id })}
+                  >
+                    <View style={styles.userBuildRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.userBuildName}>{name}</Text>
+                        <Text style={styles.userBuildId}>{buildLabel}</Text>
+                      </View>
+                      <Text style={[styles.userBuildStatus, { color: isCurrent ? colors.primary : colors.danger }]}>
+                        {isCurrent ? '✓ Current' : 'Needs Update'}
+                      </Text>
+                      {!isCurrent ? (
+                        <TouchableOpacity
+                          onPress={() => nudgeUserToUpdate(u)}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          style={{ marginLeft: 8 }}
+                        >
+                          <Ionicons name="chatbubble-ellipses-outline" size={16} color={colors.danger} />
+                        </TouchableOpacity>
+                      ) : (
+                        <Ionicons name="chevron-forward" size={16} color={colors.textMuted} style={{ marginLeft: 8 }} />
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              );
+            })
+          )}
         </View>
 
         <Text style={styles.sectionLabel}>SUPPORT & DATA</Text>
@@ -659,6 +1128,119 @@ export default function SettingsScreen() {
 
         <View style={{ height: 32 }} />
       </ScrollView>
+
+      {/* Orphan-data review modal */}
+      <Modal
+        visible={showOrphanModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => { if (!orphanDeleting) setShowOrphanModal(false); }}
+      >
+        <SafeAreaView style={styles.supportContainer}>
+          <View style={styles.supportHeader}>
+            <Text style={styles.supportTitle}>Clean Up Orphaned Data</Text>
+            <TouchableOpacity
+              onPress={() => { if (!orphanDeleting) setShowOrphanModal(false); }}
+              style={styles.supportClose}
+              disabled={orphanDeleting}
+            >
+              <Ionicons name="close" size={22} color={colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+
+          {orphanScanning ? (
+            <View style={styles.orphanScanState}>
+              <ActivityIndicator size="large" color={colors.primary} />
+              <Text style={styles.orphanScanText}>Scanning for orphaned data…</Text>
+            </View>
+          ) : orphanResults ? (
+            <ScrollView contentContainerStyle={styles.supportContent} showsVerticalScrollIndicator={false}>
+              {/* Orphaned Jobs */}
+              <View style={styles.orphanSectionHeader}>
+                <Text style={styles.orphanSectionTitle}>Orphaned Jobs</Text>
+                <Text style={styles.orphanSectionCount}>
+                  {orphanResults.jobs.length} found
+                </Text>
+              </View>
+              {orphanResults.jobs.length === 0 ? (
+                <Text style={styles.orphanEmpty}>None</Text>
+              ) : (
+                orphanResults.jobs.map((j) => (
+                  <View key={'j-' + j.id} style={styles.orphanCard}>
+                    <Text style={styles.orphanCardTitle} numberOfLines={1}>{j.projectName}</Text>
+                    <Text style={styles.orphanCardMeta} numberOfLines={1}>
+                      {j.billToName ? `${j.billToName} · ` : ''}
+                      {j.targetDate || 'no date'}
+                    </Text>
+                  </View>
+                ))
+              )}
+
+              {/* Orphaned Customers */}
+              <View style={[styles.orphanSectionHeader, { marginTop: 18 }]}>
+                <Text style={styles.orphanSectionTitle}>Orphaned Customers</Text>
+                <Text style={styles.orphanSectionCount}>
+                  {orphanResults.customers.length} found
+                </Text>
+              </View>
+              {orphanResults.customers.length === 0 ? (
+                <Text style={styles.orphanEmpty}>None</Text>
+              ) : (
+                orphanResults.customers.map((c) => (
+                  <View key={'c-' + c.id} style={styles.orphanCard}>
+                    <Text style={styles.orphanCardTitle} numberOfLines={1}>
+                      {c.name || '(no name)'}
+                    </Text>
+                    <Text style={styles.orphanCardMeta} numberOfLines={1}>
+                      {[c.email, c.phone, c.address].filter(Boolean).join(' · ') || 'no contact info'}
+                    </Text>
+                  </View>
+                ))
+              )}
+
+              {/* Orphaned Photos */}
+              <View style={[styles.orphanSectionHeader, { marginTop: 18 }]}>
+                <Text style={styles.orphanSectionTitle}>Orphaned Photos</Text>
+                <Text style={styles.orphanSectionCount}>
+                  {orphanResults.photos.length} found
+                </Text>
+              </View>
+              {orphanResults.photos.length === 0 ? (
+                <Text style={styles.orphanEmpty}>None</Text>
+              ) : (
+                orphanResults.photos.map((p) => (
+                  <View key={'p-' + p.jobId} style={styles.orphanCard}>
+                    <Text style={styles.orphanCardTitle} numberOfLines={1}>Job {p.jobId}</Text>
+                    <Text style={styles.orphanCardMeta} numberOfLines={1}>
+                      {p.fileCount} file{p.fileCount === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                ))
+              )}
+
+              <View style={{ height: 24 }} />
+            </ScrollView>
+          ) : null}
+
+          {orphanResults && !orphanScanning ? (
+            <View style={styles.orphanFooter}>
+              <TouchableOpacity
+                style={[styles.orphanDeleteBtn, orphanDeleting && { opacity: 0.5 }]}
+                onPress={confirmOrphanDelete}
+                disabled={orphanDeleting}
+                activeOpacity={0.85}
+              >
+                {orphanDeleting
+                  ? <ActivityIndicator size="small" color="#fff" />
+                  : <Ionicons name="trash-bin-outline" size={18} color="#fff" />}
+                <Text style={styles.orphanDeleteBtnText}>
+                  {orphanDeleting ? 'Deleting…' : 'Delete All'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </SafeAreaView>
+      </Modal>
 
       <Modal visible={showSupport} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowSupport(false)}>
         <SafeAreaView style={styles.supportContainer}>
@@ -757,16 +1339,20 @@ function BuildInfoRow({ label, value, valueColor }) {
   );
 }
 
-function DataRow({ icon, label, value, size, divider, onPress }) {
+function DataRow({ icon, label, value, size, divider, onPress, tint }) {
+  // `tint` recolors the icon + value when set — used by the orphan rows so a
+  // non-zero count visually stands out without changing layout.
+  const iconColor  = tint || colors.primary;
+  const valueColor = tint ? { color: tint } : null;
   const inner = (
     <View style={styles.dataRow}>
       <View style={styles.dataRowLeft}>
-        <Ionicons name={icon} size={16} color={colors.primary} />
+        <Ionicons name={icon} size={16} color={iconColor} />
         <Text style={styles.dataRowLabel}>{label}</Text>
       </View>
       <View style={styles.dataRowRight}>
         <View style={{ alignItems: 'flex-end' }}>
-          <Text style={styles.dataRowValue}>{value}</Text>
+          <Text style={[styles.dataRowValue, valueColor]}>{value}</Text>
           {size != null && <Text style={styles.dataRowSize}>{size}</Text>}
         </View>
         {onPress && <Ionicons name="chevron-forward" size={14} color={colors.textMuted} style={{ marginLeft: 4 }} />}
@@ -1008,6 +1594,10 @@ const styles = StyleSheet.create({
   dataRowLabel: { fontSize: 15, fontWeight: '500', color: colors.textPrimary },
   dataRowValue: { fontSize: 15, fontWeight: '700', color: colors.primary },
   buildInfoValue: { fontSize: 15, fontWeight: '600', color: colors.textSecondary },
+  userBuildRow:    { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
+  userBuildName:   { fontSize: 15, fontWeight: '600', color: colors.textPrimary },
+  userBuildId:     { fontSize: 12, color: colors.textMuted, fontFamily: 'Courier', marginTop: 2 },
+  userBuildStatus: { fontSize: 13, fontWeight: '700' },
   dataRowSize: { fontSize: 11, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
   totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8 },
   totalLabel: { fontSize: 12, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 },
@@ -1048,6 +1638,36 @@ const styles = StyleSheet.create({
   supportTitle: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
   supportClose: { padding: 4 },
   supportContent: { padding: 16 },
+
+  // Orphan-data cleanup modal
+  orphanScanState: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14,
+    paddingHorizontal: 32,
+  },
+  orphanScanText: { fontSize: 14, color: colors.textSecondary, textAlign: 'center' },
+  orphanSectionHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  orphanSectionTitle: { fontSize: 13, fontWeight: '800', color: colors.textPrimary, letterSpacing: 0.4 },
+  orphanSectionCount: { fontSize: 12, color: colors.textMuted, fontWeight: '600' },
+  orphanEmpty: { fontSize: 13, color: colors.textMuted, fontStyle: 'italic', marginBottom: 4 },
+  orphanCard: {
+    backgroundColor: '#fff', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
+    marginBottom: 6, borderWidth: 1, borderColor: '#f3f4f6',
+  },
+  orphanCardTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
+  orphanCardMeta:  { fontSize: 12, color: colors.textSecondary, marginTop: 2 },
+  orphanFooter: {
+    paddingHorizontal: 16, paddingVertical: 14,
+    borderTopWidth: 1, borderTopColor: '#e5e7eb',
+    backgroundColor: '#fff',
+  },
+  orphanDeleteBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: '#dc2626', paddingVertical: 14, borderRadius: 12,
+  },
+  orphanDeleteBtnText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 
   supportBrand: {
     backgroundColor: colors.primary,

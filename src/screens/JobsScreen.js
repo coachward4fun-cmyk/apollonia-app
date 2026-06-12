@@ -13,6 +13,7 @@ import {
   Image,
   Linking,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,6 +24,10 @@ import { SkeletonCard } from '../components/SkeletonLoader';
 import { notifyCrewViaWhatsApp } from '../utils/notifyCrewViaWhatsApp';
 import { saveJob } from '../services/db';
 import { openInMaps } from '../utils/openInMaps';
+import RoofEstimateModal from '../components/RoofEstimateModal';
+import { deleteStoragePhoto, storagePathFromUrl } from '../services/storageService';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../config/firebase';
 
 const PAGE_SIZE = 25;
 
@@ -68,7 +73,9 @@ function formatDate(dateStr) {
   if (!dateStr) return null;
   const d = new Date(dateStr + 'T00:00:00');
   if (isNaN(d)) return dateStr;
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const md  = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const dow = d.toLocaleDateString('en-US', { weekday: 'long' });
+  return `${md} (${dow})`;
 }
 
 function calcCrewPay(job) {
@@ -104,6 +111,102 @@ export default function JobsScreen() {
   const [crewPayFilter, setCrewPayFilter] = useState(null); // null | 'paid' | 'unpaid'
   const [crewIdFilter,  setCrewIdFilter]  = useState(null); // matches a specific crew when set
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE); // kept for load-more footer
+
+  // Job whose roof estimate is currently being viewed in the shared modal.
+  // null = modal closed. Stored as the full job object so we have access to
+  // base64 photos + photos array without a second lookup.
+  const [estimateJob, setEstimateJob] = useState(null);
+
+  // Brief toast for fire-and-forget actions (e.g. starting an estimate).
+  const [toast, setToast] = useState('');
+
+  // Tap handler for the green "Get Estimate" / red "Estimate Failed — Retry"
+  // pills on the job list. Same flow either way — confirm, flip status to
+  // pending, fire the callable without awaiting, and let the subscription
+  // propagate the result back into the UI.
+  const handleGetEstimateFromList = useCallback((job) => {
+    const address = (job.jobLocationAddress || '').trim();
+    if (!address) {
+      Alert.alert('Address Required', 'Add a job location address before requesting an estimate.');
+      return;
+    }
+    Alert.alert(
+      'Roof Estimate',
+      `Get roof estimate for ${job.projectName || 'this job'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Get Estimate',
+          onPress: async () => {
+            try {
+              await saveJob({ id: job.id, roofEstimate: { status: 'pending' } });
+              httpsCallable(functions, 'roofEstimator')({ jobId: job.id, address })
+                .catch((err) => console.warn('[RoofEstimate] callable failed:', err?.message || err));
+              setToast('Estimating in background...');
+              setTimeout(() => setToast(''), 3000);
+            } catch (err) {
+              Alert.alert('Error', err.message || 'Could not start the estimate.');
+            }
+          },
+        },
+      ],
+    );
+  }, []);
+
+  // Apply-to-line-items from the list view: line items live on the Edit Job
+  // form, so we close the modal and navigate there. The form's own apply
+  // button handles the actual line-item write.
+  const handleApplyFromList = useCallback(() => {
+    if (!estimateJob) return;
+    const target = estimateJob;
+    setEstimateJob(null);
+    navigation.navigate('JobForm', { jobId: target.id });
+  }, [estimateJob, navigation]);
+
+  // Discard from the list view — same effect as the form's discard, minus the
+  // form-local state reset (there's nothing to reset here).
+  const handleDiscardFromList = useCallback(() => {
+    if (!estimateJob) return;
+    const target = estimateJob;
+    Alert.alert(
+      'Discard Estimate',
+      'Discard this estimate? The aerial and street view photos will also be removed from the job.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Discard', style: 'destructive',
+          onPress: async () => {
+            try {
+              const currentPhotos = target.photos || [];
+              const aiUrls = currentPhotos
+                .filter((p) => typeof p === 'object' && p && (p.label === 'AI Aerial View' || p.label === 'AI Street View'))
+                .map((p) => p.uri)
+                .filter(Boolean);
+              const filteredPhotos = currentPhotos.filter((p) => {
+                if (typeof p === 'string') return true;
+                return p?.label !== 'AI Aerial View' && p?.label !== 'AI Street View';
+              });
+              await saveJob({
+                id:                    target.id,
+                roofEstimate:          null,
+                aerialPhotoBase64:     '',
+                streetViewPhotoBase64: '',
+                photos:                filteredPhotos,
+                photoCount:            filteredPhotos.length,
+              });
+              for (const url of aiUrls) {
+                const path = storagePathFromUrl(url);
+                if (path) deleteStoragePhoto(path).catch(() => {});
+              }
+              setEstimateJob(null);
+            } catch (err) {
+              Alert.alert('Error', err.message || 'Could not discard the estimate.');
+            }
+          },
+        },
+      ],
+    );
+  }, [estimateJob]);
 
   // Apply filter from navigation params.
   // Behavior contract: ANY incoming nav param is treated as an atomic "reset
@@ -396,6 +499,58 @@ export default function JobsScreen() {
                       <Text style={styles.jobIdLabel}>Job {job.jobId}</Text>
                     ) : null}
                     <View style={styles.cardTopRight}>
+                      {(() => {
+                        // Roof-estimate pill: 4 states. Visible on any roofing
+                        // job that has an address on file. Pending state is
+                        // disabled visual feedback while the function runs.
+                        const isRoofingJobWithAddress =
+                          /roof/i.test(job.jobType || '') &&
+                          (job.jobLocationAddress || '').trim().length > 0;
+                        if (!isRoofingJobWithAddress) return null;
+                        const estStatus = job.roofEstimate?.status;
+                        if (estStatus === 'complete') {
+                          return (
+                            <TouchableOpacity
+                              style={[styles.estimatePill, styles.estimatePillComplete]}
+                              onPress={() => setEstimateJob(job)}
+                              activeOpacity={0.7}
+                              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                            >
+                              <Text style={styles.estimatePillText}>View Estimate</Text>
+                            </TouchableOpacity>
+                          );
+                        }
+                        if (estStatus === 'pending') {
+                          return (
+                            <View style={[styles.estimatePill, styles.estimatePillPending]}>
+                              <ActivityIndicator size="small" color={colors.textMuted} />
+                              <Text style={[styles.estimatePillText, styles.estimatePillTextPending]}>Estimating…</Text>
+                            </View>
+                          );
+                        }
+                        if (estStatus === 'failed') {
+                          return (
+                            <TouchableOpacity
+                              style={[styles.estimatePill, styles.estimatePillFailed]}
+                              onPress={() => handleGetEstimateFromList(job)}
+                              activeOpacity={0.7}
+                              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                            >
+                              <Text style={styles.estimatePillText}>Estimate Failed</Text>
+                            </TouchableOpacity>
+                          );
+                        }
+                        return (
+                          <TouchableOpacity
+                            style={[styles.estimatePill, styles.estimatePillIdle]}
+                            onPress={() => handleGetEstimateFromList(job)}
+                            activeOpacity={0.7}
+                            hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                          >
+                            <Text style={styles.estimatePillText}>Get Estimate</Text>
+                          </TouchableOpacity>
+                        );
+                      })()}
                       <View style={[styles.statusBadge, { backgroundColor: sc.bg }]}>
                         <Text style={[styles.statusText, { color: sc.fg }]}>{job.status || 'Active'}</Text>
                       </View>
@@ -411,11 +566,37 @@ export default function JobsScreen() {
                   <Text style={styles.jobTitle} numberOfLines={2}>{job.projectName || 'Untitled Job'}</Text>
                 </View>
 
-                {job.jobType ? (
-                  <View style={styles.typePill}>
-                    <Text style={styles.typeText}>{job.jobType}</Text>
-                  </View>
-                ) : null}
+                {/* Job type (left) + invoice pill (right) on the same row.
+                    Invoice pill shows on every job regardless of status. */}
+                <View style={styles.typeRow}>
+                  {job.jobType ? (
+                    <View style={styles.typePill}>
+                      <Text style={styles.typeText}>{job.jobType}</Text>
+                    </View>
+                  ) : <View />}
+
+                  {job.invoicePdfUrl ? (
+                    <TouchableOpacity
+                      style={[styles.invoicePill, styles.invoicePillView]}
+                      onPress={() => Linking.openURL(job.invoicePdfUrl).catch(
+                        () => Alert.alert('Cannot open', 'Could not open the invoice PDF.'),
+                      )}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="document-text-outline" size={12} color="#fff" />
+                      <Text style={styles.invoicePillText}>View Invoice</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.invoicePill, styles.invoicePillCreate]}
+                      onPress={() => navigation.navigate('Invoice', { preselectedJobId: job.id })}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="add-circle-outline" size={12} color="#fff" />
+                      <Text style={styles.invoicePillText}>Create Invoice</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
 
                 {job.billToName ? (
                   <View style={styles.metaRow}>
@@ -535,6 +716,23 @@ export default function JobsScreen() {
           }}
         />
       )}
+
+      <RoofEstimateModal
+        visible={!!estimateJob}
+        roofEstimate={estimateJob?.roofEstimate || null}
+        aerialPhotoBase64={estimateJob?.aerialPhotoBase64 || ''}
+        streetViewPhotoBase64={estimateJob?.streetViewPhotoBase64 || ''}
+        jobId={estimateJob?.id}
+        onClose={() => setEstimateJob(null)}
+        onDiscard={handleDiscardFromList}
+        onApplyToLineItems={handleApplyFromList}
+      />
+
+      {toast ? (
+        <View style={styles.toast} pointerEvents="none">
+          <Text style={styles.toastText}>{toast}</Text>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -619,6 +817,28 @@ const styles = StyleSheet.create({
   },
   jobTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
   statusBadge: { borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, flexShrink: 0 },
+  estimatePill: {
+    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    flexShrink: 0,
+  },
+  estimatePillIdle:     { backgroundColor: '#16a34a' },
+  estimatePillPending:  { backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb' },
+  estimatePillComplete: { backgroundColor: '#2563eb' },
+  estimatePillFailed:   { backgroundColor: '#dc2626' },
+  estimatePillText:     { fontSize: 11, fontWeight: '700', color: '#fff' },
+  estimatePillTextPending: { color: colors.textMuted },
+  toast: {
+    position: 'absolute',
+    bottom: 48, left: 24, right: 24,
+    backgroundColor: 'rgba(22,163,74,0.95)',
+    borderRadius: 12,
+    paddingVertical: 14, paddingHorizontal: 18,
+    alignItems: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18, shadowRadius: 6, elevation: 4,
+  },
+  toastText: { color: '#fff', fontWeight: '600', fontSize: 14, textAlign: 'center' },
   statusText: { fontSize: 11, fontWeight: '700' },
   editBtn: {
     padding: 4,
@@ -626,15 +846,26 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
 
+  typeRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 8,
+  },
   typePill: {
     alignSelf: 'flex-start',
     backgroundColor: '#f0fdf4',
     borderRadius: 6,
     paddingHorizontal: 8,
     paddingVertical: 2,
-    marginBottom: 8,
   },
   typeText: { fontSize: 11, fontWeight: '600', color: colors.primary },
+
+  invoicePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3,
+  },
+  invoicePillCreate: { backgroundColor: '#16a34a' }, // green — no invoice yet
+  invoicePillView:   { backgroundColor: '#2563eb' }, // blue — invoice exists
+  invoicePillText:   { fontSize: 11, fontWeight: '700', color: '#fff' },
 
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
   metaText: { fontSize: 13, color: colors.textSecondary, flex: 1 },

@@ -3,9 +3,11 @@ import {
   View, Text, StyleSheet, Modal, TouchableOpacity,
   ScrollView, Alert, ActivityIndicator,
 } from 'react-native';
+import Constants from 'expo-constants';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { onSnapshot, doc } from 'firebase/firestore';
 import { db } from '../config/firebase';
-import { subscribeUsers, saveUser, deleteUser } from '../services/db';
+import { subscribeUsers, saveUser, deleteUser, getBuildInfo } from '../services/db';
 import { formatPhoneDisplay } from '../utils/phoneUtils';
 import { colors } from '../theme/colors';
 
@@ -45,6 +47,23 @@ export default function SelfClaimModal({ user }) {
     if (busy) return;
     setBusy(true);
     try {
+      // Stamp this install's build info onto the freshly-claimed (named) doc so it
+      // reflects the running build immediately. Without this, a fresh install /
+      // new anonymous UID claims the name on a doc with no/stale build fields, and
+      // the Admin "USER BUILD VERSIONS" list shows "Needs Update" forever (the
+      // build info written by buildUpdate.js lands on the old, now-unnamed UID doc).
+      // sanitize() in saveUser strips any undefined values, so a missing field is a no-op.
+      let buildFields = {};
+      try {
+        const info = await getBuildInfo();
+        buildFields = {
+          currentBuildId:     info?.buildId || undefined,
+          currentBuildNumber: parseInt(Constants.expoConfig?.ios?.buildNumber ?? '0', 10) || undefined,
+          currentVersion:     Constants.expoConfig?.version || undefined,
+        };
+      } catch (e) {
+        console.warn('[SelfClaim] build info fetch failed:', e?.message || e);
+      }
       await saveUser({
         id:                   uid,
         name:                 entry.name,
@@ -52,7 +71,14 @@ export default function SelfClaimModal({ user }) {
         notificationsEnabled: entry.notificationsEnabled !== false,
         claimedAt:            new Date().toISOString(),
         updatedAt:            new Date().toISOString(),
+        ...buildFields,
       });
+      // Remember which doc UID this device claimed as its named identity. After a
+      // delete + reinstall the auth UID changes, but buildUpdate.js reads this to
+      // keep writing build info onto the correct named doc instead of a fresh,
+      // unnamed shell. (Re-claiming after a reinstall overwrites it with the new UID.)
+      await AsyncStorage.setItem('namedUserDocId', uid).catch((e) =>
+        console.warn('[SelfClaim] persist namedUserDocId failed:', e?.message || e));
       await deleteUser(entry.id);
       // Modal auto-dismisses on next snapshot (selfDoc.name now set).
     } catch (err) {

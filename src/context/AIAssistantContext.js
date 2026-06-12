@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import * as Speech from 'expo-speech';
-import { Audio } from 'expo-av';
+// expo-av's audio-mode API is deprecated in SDK 54 and silently no-ops in EAS
+// builds — that's what killed TTS audibility there. expo-audio replaces it.
+import { setAudioModeAsync } from 'expo-audio';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const VOICE_KEY = 'apollonia:ai_voice_enabled';
@@ -39,6 +41,19 @@ export function AIAssistantProvider({ children }) {
     }).catch(() => {});
   }, []);
 
+  // Warm up the iOS audio session at app start. The very first
+  // setAudioModeAsync call after launch is sometimes not ready when speakText
+  // fires, which leaves TTS silent on the first attempt. Pre-initializing here
+  // means the audio mode is already configured by the time the user taps the
+  // mic. Failures are swallowed — there's nothing meaningful to do at mount.
+  useEffect(() => {
+    setAudioModeAsync({
+      playsInSilentMode:      true,
+      allowsRecording:        false,
+      shouldPlayInBackground: false,
+    }).catch(() => {});
+  }, []);
+
   const toggleVoice = useCallback((enabled) => {
     setVoiceEnabled(enabled);
     voiceEnabledRef.current = enabled;
@@ -49,6 +64,11 @@ export function AIAssistantProvider({ children }) {
   const _autoListenCb   = useRef(null);
   const _interimCb      = useRef(null);
 
+  // Tracks the last voice transcript handed off via submitVoiceText so we can
+  // drop an identical follow-up that arrives within ~1 second — guards against
+  // duplicate WebView 'result' messages from doubling the user's message.
+  const lastSubmitRef = useRef({ text: null, ts: 0 });
+
   // ── Panel lifecycle ───────────────────────────────────────────────────────────
 
   const openPanel = useCallback(() => {
@@ -58,8 +78,20 @@ export function AIAssistantProvider({ children }) {
   }, []);
 
   const submitVoiceText = useCallback((text) => {
-    Speech.stop();
-    setIsSpeaking(false);
+    // Drop a same-text repeat within 1 second — defense-in-depth against any
+    // future path that double-fires the result (e.g. a different speech
+    // backend, an injected stopRecognition race, etc.). The WebView already
+    // dedupes onend, but this is the last line of defense.
+    const now = Date.now();
+    if (text && text === lastSubmitRef.current.text && now - lastSubmitRef.current.ts < 1000) {
+      return; // duplicate within 1 second — drop it
+    }
+    lastSubmitRef.current = { text, ts: now };
+
+    // NOTE: deliberately NOT calling Speech.stop() / setIsSpeaking(false) here.
+    // handleTap already stops TTS before the mic starts, and stopping again
+    // when the transcript arrives interrupts any in-flight TTS mid-sentence
+    // (e.g. an AI question that's still being spoken when the user replies).
     setPendingVoiceText(text || null);
     setIsOpen(true);
   }, []);
@@ -108,10 +140,10 @@ export function AIAssistantProvider({ children }) {
     // succeed silently — no audible output. Setting playback mode here means
     // every TTS call starts with a clean playback-capable session.
     try {
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS:     true,
-        allowsRecordingIOS:       false,
-        staysActiveInBackground:  false,
+      await setAudioModeAsync({
+        playsInSilentMode:        true,
+        allowsRecording:          false,
+        shouldPlayInBackground:   false,
       });
     } catch (e) {
       console.warn('[Speech] setAudioModeAsync failed:', e.message);

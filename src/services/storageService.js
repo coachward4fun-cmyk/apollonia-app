@@ -140,6 +140,45 @@ export function uploadCompanyLogo(localUri) {
   return compressAndUpload(localUri, path, 600, 0.85);
 }
 
+/**
+ * Upload an invoice PDF. No image compression — the file is sent as-is.
+ * Storage path is `invoices/{jobId}/{invoiceNumber}-{timestamp}.pdf` so we
+ * keep historic versions per job (timestamp also lets a scheduled cleanup
+ * sweep files older than 60 days).
+ */
+export async function uploadInvoicePdf(localUri, jobId, invoiceNumber) {
+  const safeInv = String(invoiceNumber || 'invoice').replace(/[^A-Za-z0-9._-]/g, '_');
+  const path = `invoices/${jobId}/${safeInv}-${Date.now()}.pdf`;
+  console.log('[Storage] uploadInvoicePdf →', path);
+
+  const token = await auth.currentUser?.getIdToken();
+  if (!token) throw new Error('Not authenticated — cannot upload');
+  const bucket = await detectBucket(token);
+
+  const encodedPath = encodeURIComponent(path);
+  const uploadUrl =
+    `https://firebasestorage.googleapis.com/v0/b/${bucket}/o` +
+    `?uploadType=media&name=${encodedPath}`;
+
+  const uploadResult = await FileSystem.uploadAsync(uploadUrl, localUri, {
+    httpMethod: 'POST',
+    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+    headers: {
+      Authorization: `Firebase ${token}`,
+      'Content-Type': 'application/pdf',
+    },
+  });
+
+  if (uploadResult.status !== 200) {
+    throw new Error(`Invoice PDF upload failed — HTTP ${uploadResult.status}: ${uploadResult.body}`);
+  }
+
+  const responseData = JSON.parse(uploadResult.body);
+  const downloadToken = responseData.downloadTokens;
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedPath}` +
+         `?alt=media&token=${downloadToken}`;
+}
+
 // ── Test helper ────────────────────────────────────────────────────────────────
 
 /**

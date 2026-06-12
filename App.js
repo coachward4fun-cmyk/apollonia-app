@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet, Image, Alert, AppState } from 'react-native';
+import { View, Text, ActivityIndicator, StyleSheet, Image, Alert, AppState, Linking } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -19,6 +19,7 @@ import { colors } from './src/theme/colors';
 import usePushToken from './src/hooks/usePushToken';
 import SelfClaimModal from './src/components/SelfClaimModal';
 import { notifyCrewViaWhatsApp } from './src/utils/notifyCrewViaWhatsApp';
+import { runBuildUpdateCheck } from './src/services/buildUpdate';
 
 // Foreground notification presentation — show banner + sound, no badge.
 Notifications.setNotificationHandler({
@@ -109,13 +110,39 @@ function RootContent() {
     );
   }, []);
 
-  // Handle taps on notification action buttons. The "Notify via WhatsApp" action
-  // opens WhatsApp prefilled to the crew lead and marks the job as crewNotified.
+  // Handle notification taps and action-button presses.
+  //   - Default tap on a crew_reminder push → open the prebuilt wa.me URL
+  //     directly. Works in foreground, background, and post-launch (Expo's
+  //     response listener fires consistently across these states).
+  //   - "Notify via WhatsApp" action button → existing flow: mark the job as
+  //     crewNotified and invoke the app's notifyCrewViaWhatsApp helper.
+  //   - "Dismiss" action button → no app-side handling needed.
   useEffect(() => {
     const sub = Notifications.addNotificationResponseReceivedListener(async (response) => {
       const { actionIdentifier, notification } = response;
+      const data = notification.request.content.data || {};
+
+      // App-update push (CHANGE 10): tapping opens the EAS install page.
+      if (data.type === 'app_update' && data.installUrl) {
+        Linking.openURL(data.installUrl).catch((err) =>
+          console.warn('[notifications] open install URL failed:', err.message),
+        );
+        return;
+      }
+
+      if (
+        actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER &&
+        data.type === 'crew_reminder' &&
+        data.whatsappUrl
+      ) {
+        Linking.openURL(data.whatsappUrl).catch((err) =>
+          console.warn('[notifications] open WhatsApp URL failed:', err.message),
+        );
+        return;
+      }
+
       if (actionIdentifier !== 'NOTIFY_WHATSAPP') return; // DISMISS_LOCAL needs no handling
-      const { crewId, jobIds } = notification.request.content.data || {};
+      const { crewId, jobIds } = data;
       if (!crewId) return;
       const crew = crews.find((c) => c.id === crewId);
       const jobId = Array.isArray(jobIds) ? jobIds[0] : null;
@@ -195,6 +222,19 @@ function RootContent() {
       }
       setAppStatus('ready');
     })();
+  }, [user]);
+
+  // Build-update lifecycle (CHANGES 3/4/5/7): once auth resolves to a real user,
+  // record this device's installed build, register brand-new builds, and prompt
+  // out-of-date installs. Runs once per uid; no-ops in Expo Go.
+  const buildCheckedUid = useRef(null);
+  useEffect(() => {
+    if (!user?.uid) return;
+    if (buildCheckedUid.current === user.uid) return;
+    buildCheckedUid.current = user.uid;
+    runBuildUpdateCheck(user).catch((err) =>
+      console.warn('[buildUpdate] check failed:', err?.message || err),
+    );
   }, [user]);
 
   // ── Auth state unknown ────────────────────────────────────────────────────

@@ -42,6 +42,11 @@ function fmt$(n) {
   return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function fmtRate(n) {
+  if (n == null) return '—';
+  return '$' + Number(n).toLocaleString('en-US') + '/day';
+}
+
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
@@ -75,6 +80,9 @@ export default function CrewDetailScreen() {
       </SafeAreaView>
     );
   }
+
+  // Total crew headcount including the lead (crewSize replaces the old members list).
+  const crewSize = crew.crewSize != null ? crew.crewSize : 1;
 
   // ── Week data ──
   const week     = getWeekRange(weekOffset);
@@ -169,7 +177,7 @@ export default function CrewDetailScreen() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.crewName}>{crew.name}</Text>
-            <Text style={styles.crewSub}>{(crew.members || []).length} member{crew.members?.length !== 1 ? 's' : ''}</Text>
+            <Text style={styles.crewSub}>{crewSize} member{crewSize === 1 ? '' : 's'}</Text>
           </View>
         </View>
 
@@ -183,21 +191,12 @@ export default function CrewDetailScreen() {
           ) : null}
         </View>
 
-        <SectionTitle title="Members" />
+        <SectionTitle title="Crew Size & Rates" />
         <View style={styles.card}>
-          {(crew.members || []).length === 0 ? (
-            <Text style={styles.noMembers}>No members added.</Text>
-          ) : (
-            (crew.members || []).map((m, i) => (
-              <View key={i} style={[styles.memberRow, i > 0 && styles.memberDivider]}>
-                <View style={styles.memberBullet} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.memberName}>{m.name || '—'}</Text>
-                  {m.mobile ? <Text style={styles.memberSub}>{m.mobile}</Text> : null}
-                </View>
-              </View>
-            ))
-          )}
+          <InfoRow icon="people" label="Size"   value={`${crewSize} member${crewSize === 1 ? '' : 's'}`} />
+          <InfoRow icon="cash"   label="Lead"   value={fmtRate(crew.leadDailyRate)}   divider />
+          <InfoRow icon="cash"   label="Worker" value={fmtRate(crew.workerDailyRate)} divider />
+          <InfoRow icon="cash"   label="Helper" value={fmtRate(crew.helperDailyRate)} divider />
         </View>
 
         <SectionTitle title="Pay Crew" />
@@ -409,11 +408,7 @@ const styles = StyleSheet.create({
 
   noMembers: { fontSize: 14, color: colors.textMuted, textAlign: 'center', paddingVertical: 20 },
 
-  memberRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 11, gap: 10 },
   memberDivider: { borderTopWidth: 1, borderTopColor: '#f3f4f6' },
-  memberBullet: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.primary },
-  memberName: { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
-  memberSub: { fontSize: 12, color: colors.textMuted, marginTop: 1 },
 
   weekNav: {
     flexDirection: 'row',

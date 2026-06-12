@@ -260,6 +260,7 @@ export default function InvoiceScreen() {
                 crewName={crewMap[job.crewId] || null}
                 onEdit={() => handleEditJob(job.id)}
                 onMarkPaid={() => handleMarkPaid(job)}
+                onViewInvoice={() => handleEditJob(job.id)}
               />
             ))}
             {hasMoreJobs && (
@@ -304,11 +305,21 @@ export default function InvoiceScreen() {
 
 // ── JobCard ────────────────────────────────────────────────────────────────────
 
-function JobCard({ job, crewName, onEdit, onMarkPaid }) {
+function JobCard({ job, crewName, onEdit, onMarkPaid, onViewInvoice }) {
   const sc           = statusStyle(job.status);
   const isInvoiced   = job.invoiceTotal != null;
   const hasPhotos    = Array.isArray(job.photos) && job.photos.length > 0;
-  const isSent       = (job.status || '').toLowerCase() === 'invoice sent';
+  const statusLower  = (job.status || '').toLowerCase();
+  const isReady      = statusLower === 'invoice ready';
+  const isSent       = statusLower === 'invoice sent';
+  const isPaid       = statusLower === 'invoice paid';
+  // Mark Paid only makes sense on Invoice Sent — paid invoices can't pay again
+  // and ready ones haven't been sent yet.
+  const showMarkPaid     = isSent && !!onMarkPaid;
+  // View Invoice shows whenever a PDF has been generated for this job AND the
+  // status is in the invoice lifecycle. Same pill is available pre-pay and
+  // post-pay so the user can always reopen the wizard/preview.
+  const showViewInvoice  = (isReady || isSent || isPaid) && !!job.invoicePdfUrl && !!onViewInvoice;
 
   return (
     <View style={styles.jobCard}>
@@ -346,11 +357,21 @@ function JobCard({ job, crewName, onEdit, onMarkPaid }) {
         </View>
       )}
 
-      {isSent && onMarkPaid && (
-        <TouchableOpacity style={styles.markPaidBtn} onPress={onMarkPaid} activeOpacity={0.85}>
-          <Ionicons name="checkmark-circle" size={16} color="#fff" />
-          <Text style={styles.markPaidBtnText}>Mark Paid</Text>
-        </TouchableOpacity>
+      {(showMarkPaid || showViewInvoice) && (
+        <View style={styles.invoiceActionsRow}>
+          {showMarkPaid && (
+            <TouchableOpacity style={styles.markPaidPill} onPress={onMarkPaid} activeOpacity={0.85}>
+              <Ionicons name="checkmark-circle" size={14} color="#fff" />
+              <Text style={styles.markPaidPillText}>Mark Paid</Text>
+            </TouchableOpacity>
+          )}
+          {showViewInvoice && (
+            <TouchableOpacity style={styles.viewInvoicePill} onPress={onViewInvoice} activeOpacity={0.85}>
+              <Ionicons name="document-text-outline" size={14} color="#fff" />
+              <Text style={styles.viewInvoicePillText}>View Invoice</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       )}
     </View>
   );
@@ -439,7 +460,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
   const [invNumber, setInvNumber] = useState('');
   const [invDate,   setInvDate]   = useState(today());
   const [dueDate,   setDueDate]   = useState(addDays(today(), 30));
-  const [taxRate,   setTaxRate]   = useState('7');
+  const [taxRate,   setTaxRate]   = useState('0');
   const [taxLabel,  setTaxLabel]  = useState('');
   const [lineItems, setLineItems] = useState(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
   const [saving,       setSaving]       = useState(false);
@@ -486,9 +507,18 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
       const customer = customers.find((c) => c.name === preselectedJob.billToName);
       const isRetail = customer?.retail === true; // unset/false/undefined = non-retail
       const detected = detectTaxRate(preselectedJob.jobLocationAddress, companyProfile?.taxRates);
-      const effectiveRate = isRetail ? detected.rate : 0;
-      const savedRate = preselectedJob.taxRate != null ? preselectedJob.taxRate : effectiveRate;
-      const savedLabel = preselectedJob.taxLabel != null ? preselectedJob.taxLabel : detected.label;
+      // Non-retail customers are always tax-exempt (Real Property improvement),
+      // so force 0% regardless of any stale taxRate saved on the job from a
+      // prior default. Only retail customers inherit the detected/saved rate.
+      let savedRate;
+      let savedLabel;
+      if (isRetail) {
+        savedRate  = preselectedJob.taxRate  != null ? preselectedJob.taxRate  : detected.rate;
+        savedLabel = preselectedJob.taxLabel != null ? preselectedJob.taxLabel : detected.label;
+      } else {
+        savedRate  = 0;
+        savedLabel = '';
+      }
       setTaxRate(String(savedRate));
       setTaxLabel(savedLabel);
 
@@ -543,7 +573,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     setInvNumber('');
     setInvDate(today());
     setDueDate(addDays(today(), 30));
-    setTaxRate('7');
+    setTaxRate('0');
     setTaxLabel('');
     setLineItems(DEFAULT_LINE_ITEMS.map((i) => ({ ...i })));
     setSaving(false);
@@ -713,7 +743,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     if (isPaid) {
       // Resend locked invoice with exact saved values — no date override, no status change
       try {
-        await sendInvoiceEmail(
+        const sendResult = await sendInvoiceEmail(
           selJob,
           selJob.invoiceNumber || '',
           selJob.invoiceDate   || '',
@@ -721,6 +751,13 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
           selJob.lineItems     || [],
           { onProgress },
         );
+        if (sendResult?.pdfUrl) {
+          await saveJob({
+            id: selJob.id,
+            invoicePdfUrl:        sendResult.pdfUrl,
+            invoicePdfUploadedAt: new Date().toISOString(),
+          });
+        }
         setSending(false);
         setToast('Invoice resent');
         setTimeout(() => { reset(); onClose(); }, 2200);
@@ -735,9 +772,15 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     const invoiceData = { ...buildUpdatedJob('Invoice Ready'), invoiceDate: saveDate, dueDate: saveDue };
     try {
       // Send email first — only save if email succeeds
-      await sendInvoiceEmail(invoiceData, invNumber.trim(), saveDate, saveDue, invoiceData.lineItems, { onProgress });
-      // Email succeeded — save with Invoice Sent status
-      const sentJob = { ...invoiceData, status: 'Invoice Sent' };
+      const sendResult = await sendInvoiceEmail(invoiceData, invNumber.trim(), saveDate, saveDue, invoiceData.lineItems, { onProgress });
+      // Email succeeded — save with Invoice Sent status (and the PDF URL if upload worked)
+      const sentJob = {
+        ...invoiceData,
+        status: 'Invoice Sent',
+        ...(sendResult?.pdfUrl
+          ? { invoicePdfUrl: sendResult.pdfUrl, invoicePdfUploadedAt: new Date().toISOString() }
+          : {}),
+      };
       await saveJob(sentJob);
       logActivity('invoice_sent', `Sent invoice #${invNumber.trim()} — ${selJob.projectName || 'job'}${selJob.billToName ? ` (${selJob.billToName})` : ''} to ${selJob.email}`);
       setSending(false);
@@ -1419,17 +1462,27 @@ const styles = StyleSheet.create({
   invoiceSummaryRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 },
   invoiceSummaryText: { fontSize: 12, color: colors.textMuted },
 
-  markPaidBtn: {
-    marginTop: 10,
+  invoiceActionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: colors.primary,
-    borderRadius: 10,
-    paddingVertical: 9,
+    gap: 8,
+    marginTop: 10,
+    alignSelf: 'flex-start', // left-justified — row hugs its content width
   },
-  markPaidBtnText: { fontSize: 14, fontWeight: '700', color: '#fff' },
+  markPaidPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: colors.primary,
+  },
+  markPaidPillText: { fontSize: 12, fontWeight: '700', color: '#fff' },
+  viewInvoicePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+  },
+  viewInvoicePillText: { fontSize: 12, fontWeight: '700', color: '#fff' },
   editIconBtn: {
     marginLeft: 6,
     backgroundColor: '#f0fdf4',

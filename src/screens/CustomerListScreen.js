@@ -1,20 +1,14 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   ScrollView, TouchableOpacity, RefreshControl, TextInput, ActivityIndicator,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { subscribeCustomers, subscribeJobs, getCustomers, getJobs, saveCustomer, unarchiveCustomer } from '../services/db';
+import { subscribeCustomers, subscribeJobs, unarchiveCustomer } from '../services/db';
 import { logActivity } from '../services/activityLog';
 import { colors } from '../theme/colors';
 import { formatPhoneDisplay } from '../utils/phoneUtils';
-
-const PREDEFINED = ['Sam Ward', 'Kathleen Ward', 'Shamrock Roofing Nebraska'];
-
-function generateId() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-}
 
 export default function CustomerListScreen() {
   const navigation = useNavigation();
@@ -24,7 +18,6 @@ export default function CustomerListScreen() {
   const [search,        setSearch]        = useState('');
   const [showArchived,  setShowArchived]  = useState(false);
   const [restoringName, setRestoringName] = useState(null);
-  const seeded = useRef(false);
 
   const handleRestore = useCallback(async (customerName) => {
     setRestoringName(customerName);
@@ -38,54 +31,9 @@ export default function CustomerListScreen() {
     }
   }, []);
 
-  // Set up real-time subscriptions
+  // Live subscriptions: customer docs + jobs (jobs feed the per-customer
+  // jobCount badge derived in the useMemo below).
   useEffect(() => {
-    // Seed missing customers once on mount, then subscribe
-    const seedAndSubscribe = async () => {
-      try {
-        const [savedCustomers, savedJobs] = await Promise.all([getCustomers(), getJobs()]);
-
-        const customerMap = {};
-        for (const c of savedCustomers) {
-          if (c.name) customerMap[c.name] = c;
-        }
-
-        const toSave = [];
-
-        for (const name of PREDEFINED) {
-          if (!customerMap[name]) {
-            const c = { id: generateId(), name, address: '', email: '', salesperson: '', updatedAt: new Date().toISOString() };
-            customerMap[name] = c;
-            toSave.push(c);
-          }
-        }
-
-        for (const job of savedJobs) {
-          const n = job.billToName?.trim();
-          if (!n || customerMap[n]) continue;
-          const c = {
-            id:          generateId(),
-            name:        n,
-            address:     job.billToAddress || '',
-            email:       job.email || '',
-            salesperson: job.salesperson || '',
-            updatedAt:   new Date().toISOString(),
-          };
-          customerMap[n] = c;
-          toSave.push(c);
-        }
-
-        if (toSave.length > 0) {
-          await Promise.all(toSave.map(saveCustomer));
-        }
-        seeded.current = true;
-      } catch { /* non-blocking */ }
-    };
-
-    if (!seeded.current) {
-      seedAndSubscribe();
-    }
-
     const unsubCust = subscribeCustomers(setCustomersRaw);
     const unsubJobs = subscribeJobs(setJobs);
     return () => { unsubCust(); unsubJobs(); };
@@ -211,7 +159,23 @@ export default function CustomerListScreen() {
               </View>
 
               <View style={styles.cardBody}>
-                <Text style={styles.customerName}>{c.name}</Text>
+                <View style={styles.nameRow}>
+                  <Text style={styles.customerName} numberOfLines={1}>{c.name}</Text>
+                  {(() => {
+                    // "Incomplete" when any of the four core contact fields is
+                    // missing/empty. Trim so a whitespace-only value counts as missing.
+                    const isIncomplete =
+                      !(c.name        && c.name.trim())        ||
+                      !(c.address     && c.address.trim())     ||
+                      !(c.email       && c.email.trim())       ||
+                      !(c.phone       && String(c.phone).trim());
+                    return isIncomplete ? (
+                      <View style={styles.incompletePill}>
+                        <Text style={styles.incompletePillText}>Incomplete</Text>
+                      </View>
+                    ) : null;
+                  })()}
+                </View>
                 {c.address ? (
                   <View style={styles.metaRow}>
                     <Ionicons name="location-outline" size={12} color={colors.textMuted} />
@@ -343,7 +307,16 @@ const styles = StyleSheet.create({
   },
   avatarText: { fontSize: 20, fontWeight: '800', color: '#fff' },
   cardBody: { flex: 1 },
-  customerName: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginBottom: 3 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 3 },
+  customerName: { fontSize: 15, fontWeight: '700', color: colors.textPrimary, flexShrink: 1 },
+  incompletePill: {
+    backgroundColor: '#dc2626',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    flexShrink: 0,
+  },
+  incompletePillText: { fontSize: 11, fontWeight: '700', color: '#fff' },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
   metaText: { fontSize: 12, color: colors.textSecondary, flex: 1 },
 

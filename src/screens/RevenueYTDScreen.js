@@ -4,7 +4,7 @@ import {
   ActivityIndicator, TouchableOpacity, RefreshControl,
 } from 'react-native';
 import { getJobs } from '../services/db';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useFocusEffect, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 
@@ -38,6 +38,13 @@ function currentYear() {
 
 export default function RevenueYTDScreen() {
   const navigation = useNavigation();
+  const route = useRoute();
+  // When opened from Dashboard, back should return to Dashboard tab — not the
+  // Admin stack root (which is where this screen is registered).
+  const handleBack = useCallback(() => {
+    if (route.params?.fromDashboard) { navigation.popToTop(); navigation.navigate('Dashboard'); }
+    else navigation.goBack();
+  }, [navigation, route.params?.fromDashboard]);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -109,7 +116,7 @@ export default function RevenueYTDScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <TouchableOpacity onPress={handleBack} style={styles.backBtn}>
           <Ionicons name="chevron-back" size={22} color={colors.textSecondary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Revenue YTD {year}</Text>

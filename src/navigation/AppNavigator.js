@@ -75,7 +75,16 @@ function AppTabs() {
       <Tab.Screen name="Invoice"    component={InvoiceScreen}   />
       <Tab.Screen name="Crews"      component={CrewsNavigator}  />
       <Tab.Screen name="Expenses"   component={ExpensesScreen}  />
-      <Tab.Screen name="Admin"      component={SettingsNavigator} />
+      <Tab.Screen
+        name="Admin"
+        component={SettingsNavigator}
+        listeners={({ navigation }) => ({
+          tabPress: (e) => {
+            e.preventDefault();
+            navigation.navigate('Admin', { screen: 'SettingsList' });
+          },
+        })}
+      />
     </Tab.Navigator>
   );
 }

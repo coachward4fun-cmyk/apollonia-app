@@ -114,6 +114,62 @@ Example output: {"billToName":"John Smith","jobType":"Roofing","summary":"Custom
   }
 }
 
+// ── Job import from a photo/screenshot (Claude Vision) ───────────────────────
+// Sends a base64 image of a subcontractor job-assignment screenshot to Claude
+// and returns the extracted fields as a plain object. Mirrors the direct
+// api.anthropic.com fetch pattern used elsewhere in this file.
+const JOB_IMPORT_SYSTEM = `You are extracting job information from a screenshot of a subcontractor job assignment.
+
+Extract these fields and return ONLY valid JSON, no other text:
+{
+  "projectName": "the project/job number (e.g. OMA26-3102)",
+  "jobLocationAddress": "the job site address (labeled 'Address:')",
+  "targetDate": "the start date in YYYY-MM-DD format (labeled 'Start:')",
+  "jobType": "infer from instructions — if 'roof', 'deck', 'shingle' mentioned use 'Roofing'; if 'gutter' use 'Gutters'; if 'siding' use 'Siding'; otherwise use 'General'",
+  "notes": "the full instructions text (labeled 'Instructions:')",
+  "billToName": "if 'Subcontractor: Apollonia Construction LLC' appears, the billing customer is 'Shamrock Roofing Nebraska'; otherwise extract the company name",
+  "homeownerName": "the customer/homeowner name (labeled 'Customer:') — for notes only"
+}
+
+Rules:
+- The sender/dispatcher name at the top is NOT the customer — ignore it for billing
+- The homeowner name goes into notes as 'Homeowner: [name]' prepended to instructions
+- If Shamrock Roofing is the source, billToName = 'Shamrock Roofing Nebraska'
+- Extract only what is clearly visible — use null for missing fields`;
+
+export async function extractJobFromImage({ base64, mediaType = 'image/jpeg' }) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key':          ANTHROPIC_API_KEY,
+      'anthropic-version':  '2023-06-01',
+      'content-type':       'application/json',
+    },
+    body: JSON.stringify({
+      model:      CLAUDE_MODEL, // claude-sonnet-4-6
+      max_tokens: 1024,
+      system:     JOB_IMPORT_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+          { type: 'text',  text: 'Extract the job information from this screenshot as JSON.' },
+        ],
+      }],
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Vision request failed (${response.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`);
+  }
+
+  const data    = await response.json();
+  const rawText = data.content?.[0]?.text?.trim() || '{}';
+  const cleaned = rawText.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
+  return JSON.parse(cleaned);
+}
+
 // jobs and crews flow in from AppDataContext (already-live subscriptions in the
 // caller). Only expenses are fetched here, since they aren't in context yet.
 export async function sendAIMessage(conversationHistory, isAdminScreen, userName, { jobs = [], crews = [] } = {}) {

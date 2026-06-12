@@ -5,8 +5,13 @@ import { Asset } from 'expo-asset';
 import { logActivity } from '../services/activityLog';
 import { getCompanyProfile } from '../services/db';
 import { formatPhoneDisplay } from './phoneUtils';
+import { uploadInvoicePdf } from '../services/storageService';
 
 const SEND_EMAIL_URL = 'https://us-central1-apollonia-construction.cloudfunctions.net/sendInvoiceEmail';
+
+// Internal recipient CC'd on every outgoing invoice email — gives the office
+// a copy of what the customer received without depending on Firestore config.
+const INTERNAL_CC = 'Apolloniarecords999@gmail.com';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -386,6 +391,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
   // ── Generate PDF (invoice + photo pages) ──
   let pdfBase64 = null;
   let pdfUri    = null;
+  let pdfStorageUrl = null;
   try {
     const photoPages = buildPhotoPages(photoData, job);
     const pdfHtml    = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', pdfLogoSrc, photoPages, profile);
@@ -394,8 +400,17 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
     pdfBase64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
   } catch (pdfErr) {
     console.warn('[Invoice] PDF generation failed:', pdfErr.message);
-  } finally {
-    if (pdfUri) FileSystem.deleteAsync(pdfUri, { idempotent: true }).catch(() => {});
+  }
+
+  // ── Upload PDF to Firebase Storage so the job can show a "View Invoice" link ──
+  // Done before email send so the URL is available regardless of email outcome.
+  // Failure here doesn't block the email (the attached PDF still gets delivered).
+  if (pdfUri) {
+    try {
+      pdfStorageUrl = await uploadInvoicePdf(pdfUri, job.id, invoiceNumber);
+    } catch (err) {
+      console.warn('[Invoice] PDF storage upload failed:', err.message);
+    }
   }
 
   // ── Build email HTML body ──
@@ -476,6 +491,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         to:        toEmail,
+        cc:        [INTERNAL_CC],
         subject,
         htmlBody:  emailHtml,
         text:      plainText,
@@ -486,10 +502,12 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     logActivity('invoice_emailed', `Invoice #${invoiceNumber} — ${job.projectName || 'job'}${job.billToName ? ` (${job.billToName})` : ''} - Gmail SMTP - To: ${toEmail}`);
-    return { ok: true };
+    return { ok: true, pdfUrl: pdfStorageUrl };
   } catch (err) {
     const message = err?.message || 'Email send failed';
     logActivity('invoice_email_failed', `Invoice #${invoiceNumber} - Error: ${message}`);
     throw new Error(message);
+  } finally {
+    if (pdfUri) FileSystem.deleteAsync(pdfUri, { idempotent: true }).catch(() => {});
   }
 }
