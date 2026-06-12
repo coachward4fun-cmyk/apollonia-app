@@ -91,21 +91,24 @@ export async function runBuildUpdateCheck(user) {
 
   if (!info) return; // nothing published yet
 
-  // Out of date: Firestore advertises a newer build than this binary.
+  // Out of date: Firestore advertises a newer build than this binary. This fires
+  // on EVERY launch while the device is behind — there is no once-per-day gate.
+  // The prompt is a REQUIRED update: a single "Update Now" button, non-dismissable
+  // (no "Later", cancelable: false), so the user must tap through to the install.
   if (firebaseBuildNumber > localBuildNumber) {
     const installUrl = installUrlFor(info);
     if (installUrl) {
       Alert.alert(
-        'Update Available',
-        'A new version of Apollonia is available. Update now for the latest features.',
+        'Update Required',
+        'A new version of Apollonia is required. Tap Update Now to install the latest build.',
         [
-          { text: 'Later', style: 'cancel' },
           {
-            text: 'Update',
+            text: 'Update Now',
             onPress: () => Linking.openURL(installUrl).catch((e) =>
               console.warn('[buildUpdate] open install URL failed:', e?.message || e)),
           },
         ],
+        { cancelable: false },
       );
     }
     return; // don't mark as seen — this device hasn't actually updated yet
