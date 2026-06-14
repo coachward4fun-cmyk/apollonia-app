@@ -1,11 +1,9 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Modal, TextInput, KeyboardAvoidingView,
-  Platform, Alert, RefreshControl, ActivityIndicator,
-  Dimensions, Switch,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Modal, KeyboardAvoidingView, Platform, Alert, RefreshControl, ActivityIndicator, Dimensions, Switch,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { Image } from 'expo-image';
 import { Swipeable } from 'react-native-gesture-handler';
 import * as ImagePicker from 'expo-image-picker';
@@ -607,7 +605,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
             <FormLabel text="AMOUNT" />
             <View style={styles.inputCard}>
               <Text style={styles.inputPrefix}>$</Text>
-              <TextInput
+              <AppTextInput
                 style={[styles.input, { flex: 1 }]}
                 value={amount}
                 onChangeText={setAmount}
@@ -620,7 +618,7 @@ function AddExpenseModal({ visible, jobs, initialData, onClose, onSave }) {
 
             <FormLabel text="DESCRIPTION" />
             <View style={styles.inputCard}>
-              <TextInput
+              <AppTextInput
                 style={[styles.input, styles.inputMulti]}
                 value={description}
                 onChangeText={setDescription}

@@ -1,4 +1,7 @@
 /**
+ * REMINDER: Run this script after every EAS build. It updates meta/buildInfo AND
+ * triggers the Update Required prompt on all devices on older builds.
+ *
  * Updates meta/buildExpiry in Firestore with a 90-day expiry from today.
  * Usage: node scripts/updateBuildExpiry.js
  */

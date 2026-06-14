@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useLayoutEffect } from 'react';
 import {
-  View, Text, TextInput, StyleSheet, SafeAreaView,
-  ScrollView, TouchableOpacity, Alert, KeyboardAvoidingView, Platform,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { getCrews, saveCrew, deleteCrew, saveJob } from '../services/db';
@@ -159,7 +159,7 @@ export default function CrewFormScreen() {
 
           <Label text="CREW NAME" />
           <View style={styles.card}>
-            <TextInput
+            <AppTextInput
               style={styles.input}
               placeholder="e.g. Crew 1 – Bob"
               placeholderTextColor={colors.textMuted}
@@ -223,7 +223,7 @@ function Field({ label, value, onChangeText, placeholder, keyboard }) {
   return (
     <View style={styles.fieldRow}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
+      <AppTextInput
         style={styles.fieldInput}
         placeholder={placeholder}
         placeholderTextColor={colors.textMuted}

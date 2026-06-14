@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, TextInput, Alert, ActivityIndicator,
-  Image, Animated, KeyboardAvoidingView, Platform,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Image, Animated, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -322,7 +321,7 @@ export default function CompanyProfileScreen() {
                     {sub ? <Text style={styles.taxRowSub}>{sub}</Text> : null}
                   </View>
                   <View style={styles.taxInputWrap}>
-                    <TextInput
+                    <AppTextInput
                       style={styles.taxInput}
                       value={taxRates[key]}
                       onChangeText={(v) => updateTaxRate(key, v)}
@@ -368,7 +367,7 @@ function Field({ label, value, onChange, placeholder, keyboardType, autoCapitali
   return (
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
+      <AppTextInput
         style={[styles.fieldInput, multiline && { minHeight: 48, textAlignVertical: 'top' }]}
         value={value}
         onChangeText={onChange}

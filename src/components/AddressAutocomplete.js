@@ -1,8 +1,8 @@
 import React, { useState, useRef, useCallback } from 'react';
 import {
-  View, TextInput, TouchableOpacity, Text,
-  StyleSheet, ActivityIndicator, Platform,
+  View, TouchableOpacity, Text, StyleSheet, ActivityIndicator, Platform,
 } from 'react-native';
+import AppTextInput from './AppTextInput';
 import { Ionicons } from '@expo/vector-icons';
 
 const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_KEY;
@@ -120,7 +120,7 @@ export default function AddressAutocomplete({
     <View style={styles.wrapper}>
       {/* ── Text input ── */}
       <View style={flat ? styles.flatRow : styles.cardRow}>
-        <TextInput
+        <AppTextInput
           style={flat ? styles.flatInput : styles.cardInput}
           value={value}
           onChangeText={handleChangeText}

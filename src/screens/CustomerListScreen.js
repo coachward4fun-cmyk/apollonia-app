@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView,
-  ScrollView, TouchableOpacity, RefreshControl, TextInput, ActivityIndicator,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, RefreshControl, ActivityIndicator,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { subscribeCustomers, subscribeJobs, unarchiveCustomer } from '../services/db';
@@ -113,7 +113,7 @@ export default function CustomerListScreen() {
 
       <View style={styles.searchWrap}>
         <Ionicons name="search-outline" size={16} color={colors.textMuted} style={styles.searchIcon} />
-        <TextInput
+        <AppTextInput
           style={styles.searchInput}
           value={search}
           onChangeText={setSearch}

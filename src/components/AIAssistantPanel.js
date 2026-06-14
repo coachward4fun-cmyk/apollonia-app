@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, Modal, TouchableOpacity, ScrollView,
-  TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
-  InteractionManager, Animated,
+  View, Text, StyleSheet, Modal, TouchableOpacity, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, InteractionManager, Animated,
 } from 'react-native';
+import AppTextInput from './AppTextInput';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAIAssistant } from '../context/AIAssistantContext';
@@ -77,7 +76,6 @@ export default function AIAssistantPanel() {
   const handlePauseFlowRef  = useRef(null);
   const handleConfirmRef    = useRef(null);
   const handleCancelRef     = useRef(null);
-  const lastTextRef         = useRef('');
   // True while we're listening for a yes/no answer to a Claude-proposed
   // pendingAction during a voice session. handleSend short-circuits to
   // handleConfirm / handleCancel when this is set.
@@ -124,7 +122,6 @@ export default function AIAssistantPanel() {
       setLocalPending(null);
       setCustomerPicker(null);
       setTextInput('');
-      lastTextRef.current = '';
       awaitingPendingConfirmationRef.current = false;
       smartCreateFollowupRef.current = null;
       voiceCreateStateRef.current = null;
@@ -777,7 +774,6 @@ export default function AIAssistantPanel() {
     stopAutoListen();
 
     setTextInput('');
-    lastTextRef.current = '';
     addMessage({ role: 'user', content: trimmed });
 
     // ── Voice confirmation: user is answering yes/no to a pending action ────
@@ -1111,18 +1107,9 @@ export default function AIAssistantPanel() {
     speakText(content);
   }, [speakText]);
 
-  // iOS keyboard dictation fires onChangeText twice when dictation ends — once
-  // with the dictated text, and again after React reconciles the controlled
-  // value, producing a doubled string. iOS inserts a single space between the
-  // two copies, so the real shape is "X X" not "XX" — match both so the guard
-  // actually catches it (the no-space variant was never observed in practice
-  // but is kept as a safety net for any future iOS variant).
-  const handleChangeText = useCallback((text) => {
-    const prev = lastTextRef.current;
-    if (prev.length > 0 && (text === prev + prev || text === prev + ' ' + prev)) return;
-    lastTextRef.current = text;
-    setTextInput(text);
-  }, []);
+  // iOS keyboard dictation doubling is handled by AppTextInput's shared guard
+  // (see src/components/AppTextInput.js); the input below wires straight to
+  // setTextInput.
 
   // Keep refs current so async auto-listen callbacks see latest closures
   handleSendRef.current      = handleSend;
@@ -1327,7 +1314,7 @@ export default function AIAssistantPanel() {
 
           {/* Input row */}
           <View style={styles.inputRow}>
-            <TextInput
+            <AppTextInput
               ref={inputRef}
               style={styles.input}
               placeholder={
@@ -1339,7 +1326,7 @@ export default function AIAssistantPanel() {
               }
               placeholderTextColor="#9ca3af"
               value={textInput}
-              onChangeText={handleChangeText}
+              onChangeText={setTextInput}
               onSubmitEditing={() => handleSend(textInput)}
               returnKeyType="send"
               multiline={false}

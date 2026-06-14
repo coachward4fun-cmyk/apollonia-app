@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView,
-  ScrollView, TouchableOpacity, TextInput,
-  Alert, ActivityIndicator, Animated, Switch,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Animated, Switch,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { getCustomers, saveCustomer, getJobs, archiveCustomer, deleteCustomer } from '../services/db';
@@ -269,7 +268,7 @@ function Field({ label, value, onChange, placeholder, keyboardType, autoCapitali
   return (
     <View style={styles.fieldWrap}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
+      <AppTextInput
         style={styles.fieldInput}
         value={value}
         onChangeText={onChange}

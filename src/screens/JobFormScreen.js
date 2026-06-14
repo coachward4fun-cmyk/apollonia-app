@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, TextInput, KeyboardAvoidingView, Platform,
-  Alert, ActivityIndicator, Modal, useWindowDimensions, Linking,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, KeyboardAvoidingView, Platform, Alert, ActivityIndicator, Modal, useWindowDimensions, Linking,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { Image } from 'expo-image';
 import { getJobs, saveJob, deleteJob, assignJobId, getJobTypes, getExpenses, saveExpense, saveCustomer } from '../services/db';
 import { useAppData } from '../context/AppDataContext';
@@ -1086,7 +1085,7 @@ export default function JobFormScreen() {
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="PROJECT NAME *" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={projectName} onChangeText={setProjectName} placeholder="e.g. Front Yard Concrete" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <AppTextInput style={styles.input} value={projectName} onChangeText={setProjectName} placeholder="e.g. Front Yard Concrete" placeholderTextColor={colors.textMuted} returnKeyType="next" />
               </View>
             </View>
             <View style={isLandscape ? styles.formCell : null}>
@@ -1130,7 +1129,7 @@ export default function JobFormScreen() {
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="ESTIMATED DURATION DAYS" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={estimatedDuration} onChangeText={setEstimatedDuration} placeholder="e.g. 2" placeholderTextColor={colors.textMuted} returnKeyType="next" keyboardType="numbers-and-punctuation" />
+                <AppTextInput style={styles.input} value={estimatedDuration} onChangeText={setEstimatedDuration} placeholder="e.g. 2" placeholderTextColor={colors.textMuted} returnKeyType="next" keyboardType="numbers-and-punctuation" />
               </View>
             </View>
             <View style={isLandscape ? styles.formCell : null}>
@@ -1156,7 +1155,7 @@ export default function JobFormScreen() {
             <View style={styles.crewCostRow}>
               <View style={styles.crewCostField}>
                 <Text style={styles.crewCostLabel}># of Leads</Text>
-                <TextInput
+                <AppTextInput
                   style={styles.crewCostInput}
                   value={crewLeads}
                   onChangeText={setCrewLeads}
@@ -1166,7 +1165,7 @@ export default function JobFormScreen() {
               </View>
               <View style={styles.crewCostField}>
                 <Text style={styles.crewCostLabel}># of Helpers</Text>
-                <TextInput
+                <AppTextInput
                   style={styles.crewCostInput}
                   value={crewHelpers}
                   onChangeText={setCrewHelpers}
@@ -1176,7 +1175,7 @@ export default function JobFormScreen() {
               </View>
               <View style={styles.crewCostField}>
                 <Text style={styles.crewCostLabel}># of Workers</Text>
-                <TextInput
+                <AppTextInput
                   style={styles.crewCostInput}
                   value={crewWorkers}
                   onChangeText={setCrewWorkers}
@@ -1193,7 +1192,7 @@ export default function JobFormScreen() {
                 <Text style={styles.crewCostLabel}>Lead $/Day</Text>
                 <View style={styles.crewCostPriceRow}>
                   <Text style={styles.crewCostDollar}>$</Text>
-                  <TextInput
+                  <AppTextInput
                     style={styles.crewCostInput}
                     value={leadRate}
                     onChangeText={setLeadRate}
@@ -1206,7 +1205,7 @@ export default function JobFormScreen() {
                 <Text style={styles.crewCostLabel}>Helper $/Day</Text>
                 <View style={styles.crewCostPriceRow}>
                   <Text style={styles.crewCostDollar}>$</Text>
-                  <TextInput
+                  <AppTextInput
                     style={styles.crewCostInput}
                     value={helperRate}
                     onChangeText={setHelperRate}
@@ -1219,7 +1218,7 @@ export default function JobFormScreen() {
                 <Text style={styles.crewCostLabel}>Worker $/Day</Text>
                 <View style={styles.crewCostPriceRow}>
                   <Text style={styles.crewCostDollar}>$</Text>
-                  <TextInput
+                  <AppTextInput
                     style={styles.crewCostInput}
                     value={workerRate}
                     onChangeText={setWorkerRate}
@@ -1260,7 +1259,7 @@ export default function JobFormScreen() {
             <>
               <FormLabel text="CUSTOMER NAME" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={billToName} onChangeText={setBillToName} placeholder="Full customer name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <AppTextInput style={styles.input} value={billToName} onChangeText={setBillToName} placeholder="Full customer name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
               </View>
             </>
           )}
@@ -1278,14 +1277,14 @@ export default function JobFormScreen() {
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="CUSTOMER EMAIL" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="customer@example.com" placeholderTextColor={colors.textMuted} keyboardType="email-address" autoCapitalize="none" returnKeyType="next" />
+                <AppTextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="customer@example.com" placeholderTextColor={colors.textMuted} keyboardType="email-address" autoCapitalize="none" returnKeyType="next" />
               </View>
             </View>
           </View>
 
           <FormLabel text="CUSTOMER PHONE" />
           <View style={styles.inputCard}>
-            <TextInput style={[styles.input, { flex: 1 }]} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
+            <AppTextInput style={[styles.input, { flex: 1 }]} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
             {phone.trim().length > 0 && (
               <TouchableOpacity
                 onPress={() => Linking.openURL('tel:' + phone.trim()).catch(() => Alert.alert('Cannot dial', 'Phone calls are not supported on this device.'))}
@@ -1353,13 +1352,13 @@ export default function JobFormScreen() {
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="SALESPERSON" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={salesperson} onChangeText={setSalesperson} placeholder="Name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <AppTextInput style={styles.input} value={salesperson} onChangeText={setSalesperson} placeholder="Name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
               </View>
             </View>
             <View style={isLandscape ? styles.formCell : null}>
               <FormLabel text="INVOICE NUMBER" />
               <View style={styles.inputCard}>
-                <TextInput style={styles.input} value={invoiceNumber} onChangeText={setInvoiceNumber} placeholder="e.g. 26120-001" placeholderTextColor={colors.textMuted} returnKeyType="next" autoCapitalize="none" />
+                <AppTextInput style={styles.input} value={invoiceNumber} onChangeText={setInvoiceNumber} placeholder="e.g. 26120-001" placeholderTextColor={colors.textMuted} returnKeyType="next" autoCapitalize="none" />
               </View>
             </View>
           </View>
@@ -1378,12 +1377,12 @@ export default function JobFormScreen() {
           <FormLabel text="INVOICE TOTAL" />
           <View style={styles.inputCard}>
             <Text style={styles.inputPrefix}>$</Text>
-            <TextInput style={[styles.input, { flex: 1 }]} value={invoiceTotal} onChangeText={setInvoiceTotal} placeholder="0.00" placeholderTextColor={colors.textMuted} keyboardType="decimal-pad" returnKeyType="next" />
+            <AppTextInput style={[styles.input, { flex: 1 }]} value={invoiceTotal} onChangeText={setInvoiceTotal} placeholder="0.00" placeholderTextColor={colors.textMuted} keyboardType="decimal-pad" returnKeyType="next" />
           </View>
 
           <FormLabel text="NOTES" />
           <View style={styles.inputCard}>
-            <TextInput style={[styles.input, styles.inputMultiTall]} value={notes} onChangeText={setNotes} placeholder="Additional notes…" placeholderTextColor={colors.textMuted} multiline returnKeyType="default" />
+            <AppTextInput style={[styles.input, styles.inputMultiTall]} value={notes} onChangeText={setNotes} placeholder="Additional notes…" placeholderTextColor={colors.textMuted} multiline returnKeyType="default" />
           </View>
 
           {isEdit && (
@@ -1485,7 +1484,7 @@ export default function JobFormScreen() {
           </View>
           <View style={styles.custSearchWrap}>
             <Ionicons name="search-outline" size={16} color={colors.textMuted} style={{ marginRight: 8 }} />
-            <TextInput
+            <AppTextInput
               style={styles.custSearchInput}
               value={customerSearch}
               onChangeText={setCustomerSearch}
@@ -1639,7 +1638,7 @@ export default function JobFormScreen() {
               {editLineItems.map((item, index) => (
                 <View key={index} style={styles.liCard}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                    <TextInput
+                    <AppTextInput
                       style={[styles.liInput, { flex: 1, textAlign: 'left' }]}
                       value={item.description}
                       onChangeText={(v) => setEditLineItems((prev) => prev.map((it, i) => i === index ? { ...it, description: v } : it))}
@@ -1653,7 +1652,7 @@ export default function JobFormScreen() {
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                     <View style={{ alignItems: 'center', gap: 2 }}>
                       <Text style={styles.liFieldLabel}>Qty</Text>
-                      <TextInput
+                      <AppTextInput
                         style={styles.liInput}
                         value={String(item.qty)}
                         onChangeText={(v) => setEditLineItems((prev) => prev.map((it, i) => i === index ? { ...it, qty: v } : it))}
@@ -1666,7 +1665,7 @@ export default function JobFormScreen() {
                       <Text style={styles.liFieldLabel}>Unit Price</Text>
                       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                         <Text style={{ fontSize: 13, color: colors.textSecondary, marginRight: 2 }}>$</Text>
-                        <TextInput
+                        <AppTextInput
                           style={styles.liInput}
                           value={String(item.unitPrice)}
                           onChangeText={(v) => setEditLineItems((prev) => prev.map((it, i) => i === index ? { ...it, unitPrice: v } : it))}
@@ -1694,7 +1693,7 @@ export default function JobFormScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                   <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textSecondary }}>Tax Rate</Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                    <TextInput
+                    <AppTextInput
                       style={styles.liInput}
                       value={editTaxRate}
                       onChangeText={setEditTaxRate}

@@ -1,17 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  SafeAreaView,
-  ScrollView,
-  TouchableOpacity,
-  Alert,
-  ActivityIndicator,
-  Modal,
-  TextInput,
-  Linking,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Modal, Linking,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
@@ -1453,7 +1444,7 @@ function EmailConfigSection({ emailConfig, onSaved }) {
       <View style={styles.configField}>
         <Text style={styles.configFieldLabel}>App Password</Text>
         <View style={styles.appPasswordRow}>
-          <TextInput
+          <AppTextInput
             style={[styles.configFieldInput, { flex: 1 }]}
             value={passwordLocked ? '••••••••••••••••' : appPassword}
             onChangeText={passwordLocked ? undefined : setAppPassword}
@@ -1527,7 +1518,7 @@ function ConfigField({ label, value, onChangeText, placeholder, secureTextEntry,
   return (
     <View style={styles.configField}>
       <Text style={styles.configFieldLabel}>{label}</Text>
-      <TextInput
+      <AppTextInput
         style={styles.configFieldInput}
         value={value}
         onChangeText={onChangeText}

@@ -1,9 +1,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, Modal, TextInput, KeyboardAvoidingView,
-  Platform, Alert, RefreshControl, ActivityIndicator, Image,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Modal, KeyboardAvoidingView, Platform, Alert, RefreshControl, ActivityIndicator, Image,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import DatePickerField from '../components/DatePickerField';
 import { sendInvoiceEmail } from '../utils/sendInvoiceEmail';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
@@ -874,7 +873,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                       <Ionicons name="lock-closed" size={12} color={colors.textMuted} />
                     </View>
                   ) : (
-                    <TextInput
+                    <AppTextInput
                       style={styles.detailInput}
                       value={invNumber}
                       onChangeText={setInvNumber}
@@ -915,7 +914,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                       <Ionicons name="lock-closed" size={12} color={colors.textMuted} />
                     </View>
                   ) : (
-                    <TextInput
+                    <AppTextInput
                       style={styles.detailInput}
                       value={taxRate}
                       onChangeText={(v) => {
@@ -968,7 +967,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                     <View key={i} style={[styles.lineItemCard, item._isExpense && styles.lineItemCardExpense]}>
                       <View style={styles.lineItemDescRow}>
                         {!isPaid && item._isExpense ? (
-                          <TextInput
+                          <AppTextInput
                             style={[styles.lineItemDesc, styles.lineItemDescInput]}
                             value={item.description}
                             onChangeText={(v) => updateItem(i, 'description', v)}
@@ -995,7 +994,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                           {isPaid ? (
                             <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>{item.qty}</Text>
                           ) : (
-                            <TextInput
+                            <AppTextInput
                               style={styles.lineItemInput}
                               value={item.qty}
                               onChangeText={(v) => updateItem(i, 'qty', v)}
@@ -1012,7 +1011,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                             {isPaid ? (
                               <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>{item.unitPrice}</Text>
                             ) : (
-                              <TextInput
+                              <AppTextInput
                                 style={styles.lineItemInput}
                                 value={item.unitPrice}
                                 onChangeText={(v) => updateItem(i, 'unitPrice', v)}
@@ -1038,7 +1037,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                       {isPaid ? (
                         <Text style={[styles.taxRateInput, { color: colors.textSecondary, paddingVertical: 8 }]}>{taxRate}</Text>
                       ) : (
-                        <TextInput
+                        <AppTextInput
                           style={styles.taxRateInput}
                           value={taxRate}
                           onChangeText={setTaxRate}

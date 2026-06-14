@@ -1,20 +1,8 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  SafeAreaView,
-  ScrollView,
-  FlatList,
-  RefreshControl,
-  TouchableOpacity,
-  TextInput,
-  Platform,
-  Image,
-  Linking,
-  Alert,
-  ActivityIndicator,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, FlatList, RefreshControl, TouchableOpacity, Platform, Image, Linking, Alert, ActivityIndicator,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
@@ -351,7 +339,7 @@ export default function JobsScreen() {
       {/* Search */}
       <View style={styles.searchWrap}>
         <Ionicons name="search-outline" size={16} color={colors.textMuted} />
-        <TextInput
+        <AppTextInput
           style={styles.searchInput}
           placeholder="Search jobs, customers, addresses…"
           placeholderTextColor={colors.textMuted}

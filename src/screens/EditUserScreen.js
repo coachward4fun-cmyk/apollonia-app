@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, TextInput, Switch, KeyboardAvoidingView,
-  Platform, Alert, ActivityIndicator,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, Switch, KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { onSnapshot, doc } from 'firebase/firestore';
@@ -114,7 +113,7 @@ export default function EditUserScreen() {
 
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <Text style={styles.fieldLabel}>NAME</Text>
-          <TextInput
+          <AppTextInput
             style={styles.input}
             value={name}
             onChangeText={setName}
@@ -125,7 +124,7 @@ export default function EditUserScreen() {
           />
 
           <Text style={styles.fieldLabel}>MOBILE</Text>
-          <TextInput
+          <AppTextInput
             style={styles.input}
             value={mobile}
             onChangeText={setMobile}

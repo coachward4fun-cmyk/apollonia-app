@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, Image, Alert, ActivityIndicator,
-  KeyboardAvoidingView, Platform, ScrollView,
+  View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Image, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { auth } from '../config/firebase';
 import {
   signInWithEmailAndPassword,
@@ -170,7 +169,7 @@ export default function LoginScreen() {
           <Text style={styles.label}>EMAIL</Text>
           <View style={styles.inputCard}>
             <Ionicons name="mail-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
-            <TextInput
+            <AppTextInput
               style={styles.input}
               value={email}
               onChangeText={setEmail}
@@ -188,7 +187,7 @@ export default function LoginScreen() {
           <Text style={[styles.label, { marginTop: 14 }]}>PASSWORD</Text>
           <View style={styles.inputCard}>
             <Ionicons name="lock-closed-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
-            <TextInput
+            <AppTextInput
               ref={passwordRef}
               style={styles.input}
               value={password}
@@ -210,7 +209,7 @@ export default function LoginScreen() {
               <Text style={[styles.label, { marginTop: 14 }]}>CONFIRM PASSWORD</Text>
               <View style={styles.inputCard}>
                 <Ionicons name="lock-closed-outline" size={18} color={colors.textMuted} style={styles.inputIcon} />
-                <TextInput
+                <AppTextInput
                   ref={confirmPassRef}
                   style={styles.input}
                   value={confirmPass}

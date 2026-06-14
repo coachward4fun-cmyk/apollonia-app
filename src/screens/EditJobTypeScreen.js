@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, SafeAreaView, ScrollView,
-  TouchableOpacity, TextInput, KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  View, Text, StyleSheet, SafeAreaView, ScrollView, TouchableOpacity, KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
 } from 'react-native';
+import AppTextInput from '../components/AppTextInput';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { getJobTypes, saveJobType } from '../services/db';
@@ -112,7 +112,7 @@ export default function EditJobTypeScreen() {
 
           <Text style={styles.sectionLabel}>JOB TYPE NAME</Text>
           <View style={styles.inputCard}>
-            <TextInput
+            <AppTextInput
               style={styles.input}
               value={name}
               onChangeText={setName}
@@ -138,7 +138,7 @@ export default function EditJobTypeScreen() {
             lineItems.map((item, i) => (
               <View key={i} style={styles.lineItemCard}>
                 <View style={styles.lineItemDescRow}>
-                  <TextInput
+                  <AppTextInput
                     style={styles.lineItemDescInput}
                     value={item.description}
                     onChangeText={(v) => updateItem(i, 'description', v)}
@@ -153,7 +153,7 @@ export default function EditJobTypeScreen() {
                 <View style={styles.lineItemRow}>
                   <View style={styles.lineItemField}>
                     <Text style={styles.fieldLabel}>Default Qty</Text>
-                    <TextInput
+                    <AppTextInput
                       style={styles.fieldInput}
                       value={item.qty}
                       onChangeText={(v) => updateItem(i, 'qty', v)}
@@ -165,7 +165,7 @@ export default function EditJobTypeScreen() {
                     <Text style={styles.fieldLabel}>Unit Price</Text>
                     <View style={styles.priceWrap}>
                       <Text style={styles.dollarSign}>$</Text>
-                      <TextInput
+                      <AppTextInput
                         style={styles.fieldInput}
                         value={item.unitPrice}
                         onChangeText={(v) => updateItem(i, 'unitPrice', v)}
