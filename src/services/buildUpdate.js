@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
-import { Alert, Linking } from 'react-native';
-import { getBuildInfo, saveUser } from './db';
+import { Alert } from 'react-native';
+import { getBuildInfo, saveUser, getUser } from './db';
 
 // Last EAS build id this device has acknowledged. Lets us show the "up to date"
 // confirmation exactly once, right after the user installs a newer build.
@@ -65,6 +65,21 @@ export async function runBuildUpdateCheck(user) {
     console.error('[BuildUpdate] failed to write currentBuildId:', err);
   }
 
+  // ── Backfill namedUserDocId when this device IS on its named doc ─────────────
+  // If users/{uid} already has a name, this auth UID *is* the user's named doc.
+  // Record it under 'namedUserDocId' so a future UID change (fresh install, lost
+  // anonymous-auth persistence) propagates build writes back to it — even if the
+  // user never went through SelfClaimModal (which only offers unclaimed manual_*
+  // template docs and so never re-shows for an already-named returning user).
+  try {
+    const selfDoc = await getUser(user.uid);
+    if (selfDoc?.name && String(selfDoc.name).trim()) {
+      await AsyncStorage.setItem('namedUserDocId', user.uid).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('[buildUpdate] self-name backfill failed:', err?.message || err);
+  }
+
   // ── Propagate to the user's claimed named doc after a reinstall ─────────────
   // A delete + reinstall mints a fresh anonymous-auth UID, so the self-write
   // above lands on a brand-new doc while the user's *named* doc (claimed via
@@ -91,27 +106,21 @@ export async function runBuildUpdateCheck(user) {
 
   if (!info) return; // nothing published yet
 
-  // Out of date: Firestore advertises a newer build than this binary. This fires
-  // on EVERY launch while the device is behind — there is no once-per-day gate.
-  // The prompt is a REQUIRED update: a single "Update Now" button, non-dismissable
-  // (no "Later", cancelable: false), so the user must tap through to the install.
+  // Out of date: Firestore advertises a newer build than this binary. Instead of
+  // a blocking Alert, RETURN the update details so App.js can render the
+  // UpdateModal overlay. The check runs once per launch, so the modal re-appears
+  // every launch while the device is behind (dismissible — full app access after).
   if (firebaseBuildNumber > localBuildNumber) {
     const installUrl = installUrlFor(info);
     if (installUrl) {
-      Alert.alert(
-        'Update Required',
-        'A new version of Apollonia is required. Tap Update Now to install the latest build.',
-        [
-          {
-            text: 'Update Now',
-            onPress: () => Linking.openURL(installUrl).catch((e) =>
-              console.warn('[buildUpdate] open install URL failed:', e?.message || e)),
-          },
-        ],
-        { cancelable: false },
-      );
+      return {
+        updateAvailable: true,
+        installUrl,
+        version:     info?.version || localVersion,
+        buildNumber: info?.buildNumber || String(firebaseBuildNumber),
+      };
     }
-    return; // don't mark as seen — this device hasn't actually updated yet
+    return; // no install URL — nothing to show
   }
 
   // Current. If the published buildId differs from what we last acknowledged on

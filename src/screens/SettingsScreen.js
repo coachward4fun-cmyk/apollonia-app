@@ -246,6 +246,10 @@ export default function SettingsScreen() {
 
   // The latest published build number — anyone on a lower one "Needs Update".
   const publishedBuildNumber = parseInt(buildInfo?.buildNumber, 10) || 0;
+  // This device's own build vs published — drives the version-pill color at the
+  // top of the page (green = current, red = behind).
+  const deviceBuildNumber = parseInt(Constants.expoConfig?.ios?.buildNumber, 10) || 0;
+  const versionCurrent = publishedBuildNumber === 0 ? true : deviceBuildNumber >= publishedBuildNumber;
   // Only show claimed team members (Scott, Kleodian, Mary) — anonymous-auth
   // shells have no name and would otherwise flood the list with raw UIDs.
   const namedBuildUsers = buildUsers.filter((u) => u.name && String(u.name).trim());
@@ -824,8 +828,8 @@ export default function SettingsScreen() {
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Admin</Text>
           {buildVersion ? (
-            <View style={styles.versionPill}>
-              <Text style={styles.versionPillText}>{buildVersion}</Text>
+            <View style={[styles.versionPill, !versionCurrent && styles.versionPillRed]}>
+              <Text style={[styles.versionPillText, !versionCurrent && styles.versionPillTextRed]}>{buildVersion}</Text>
             </View>
           ) : null}
         </View>
@@ -1031,16 +1035,26 @@ export default function SettingsScreen() {
                           ✓ Current
                         </Text>
                       ) : (
-                        // Tapping the red badge opens the install link in Safari so
-                        // the user can update directly from this row.
+                        // Tapping the red badge shows install instructions, then
+                        // opens the install link in the browser on confirm.
                         <TouchableOpacity
                           onPress={() => {
-                            if (updateInstallUrl) {
-                              Linking.openURL(updateInstallUrl).catch((err) =>
-                                console.warn('[settings] open install URL failed:', err?.message || err));
-                            } else {
+                            if (!updateInstallUrl) {
                               Alert.alert('No install link', 'No build install link is available yet.');
+                              return;
                             }
+                            Alert.alert(
+                              'Update Available',
+                              'To update: tap Open, then tap Install when the page loads in your browser.',
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                {
+                                  text: 'Open',
+                                  onPress: () => Linking.openURL(updateInstallUrl).catch((err) =>
+                                    console.warn('[settings] open install URL failed:', err?.message || err)),
+                                },
+                              ],
+                            );
                           }}
                           hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
                         >
@@ -1575,6 +1589,13 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontFamily: 'Courier',
     letterSpacing: 0.3,
+  },
+  versionPillRed: {
+    backgroundColor: '#fef2f2',
+    borderColor: '#fca5a5',
+  },
+  versionPillTextRed: {
+    color: colors.danger,
   },
 
   sectionLabel: {

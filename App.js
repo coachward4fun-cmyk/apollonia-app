@@ -18,6 +18,7 @@ import { ExpiryBanner, ExpiryBlockScreen } from './src/components/ExpiryWarning'
 import { colors } from './src/theme/colors';
 import usePushToken from './src/hooks/usePushToken';
 import SelfClaimModal from './src/components/SelfClaimModal';
+import UpdateModal from './src/components/UpdateModal';
 import { notifyCrewViaWhatsApp } from './src/utils/notifyCrewViaWhatsApp';
 import { runBuildUpdateCheck } from './src/services/buildUpdate';
 
@@ -228,13 +229,14 @@ function RootContent() {
   // record this device's installed build, register brand-new builds, and prompt
   // out-of-date installs. Runs once per uid; no-ops in Expo Go.
   const buildCheckedUid = useRef(null);
+  const [updateInfo, setUpdateInfo] = useState(null);
   useEffect(() => {
     if (!user?.uid) return;
     if (buildCheckedUid.current === user.uid) return;
     buildCheckedUid.current = user.uid;
-    runBuildUpdateCheck(user).catch((err) =>
-      console.warn('[buildUpdate] check failed:', err?.message || err),
-    );
+    runBuildUpdateCheck(user)
+      .then((res) => { if (res?.updateAvailable) setUpdateInfo(res); })
+      .catch((err) => console.warn('[buildUpdate] check failed:', err?.message || err));
   }, [user]);
 
   // ── Auth state unknown ────────────────────────────────────────────────────
@@ -285,6 +287,7 @@ function RootContent() {
       <FloatingMicButton />
       <AIAssistantPanel />
       <SelfClaimModal user={user} />
+      <UpdateModal info={updateInfo} onDismiss={() => setUpdateInfo(null)} />
     </View>
   );
 }

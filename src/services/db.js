@@ -406,6 +406,11 @@ export async function getUsers() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+export async function getUser(id) {
+  const snap = await getDoc(doc(db, 'users', id));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
 // ── Build info (meta/buildInfo) ──────────────────────────────────────────────
 // Tracks the latest published EAS build so the app can prompt out-of-date
 // installs to update. Written on launch by the first device running a new build.
