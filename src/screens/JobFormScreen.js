@@ -1441,11 +1441,8 @@ export default function JobFormScreen() {
                   setEmail(c.email || '');
                   setPhone(c.phone || '');
                   setSalesperson(c.salesperson || '');
-                  // Default job location to the customer's address — only when
-                  // the user hasn't already typed a different site address.
-                  if (!jobLocationAddress.trim() && c.address) {
-                    setJobLocationAddress(c.address);
-                  }
+                  // Job Location Address is the physical job site, not the
+                  // customer's billing address — leave it for manual entry.
                   setCustomerSearch('');
                   setShowCustomerPicker(false);
                 }}
