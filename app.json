@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "buildNumber": "9",
+      "buildNumber": "10",
       "infoPlist": {
         "NSCameraUsageDescription": "Apollonia needs camera access to take job site photos and expense receipts",
         "NSPhotoLibraryUsageDescription": "Apollonia needs photo library access to attach photos to jobs and expenses",

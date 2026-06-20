@@ -43,6 +43,14 @@ function FormLabel({ text }) {
   return <Text style={styles.formLabel}>{text}</Text>;
 }
 
+function SectionHeader({ text }) {
+  return (
+    <View style={styles.sectionHeader}>
+      <Text style={styles.sectionHeaderText}>{text}</Text>
+    </View>
+  );
+}
+
 function PickerSheet({ visible, title, items, onSelect, onClose }) {
   if (!visible) return null;
   return (
@@ -1081,73 +1089,90 @@ export default function JobFormScreen() {
             </TouchableOpacity>
           )}
 
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="PROJECT NAME *" />
+          {/* ── JOB INFO ──────────────────────────────────────────────── */}
+          <SectionHeader text="JOB INFO" />
+
+          <FormLabel text="PROJECT NAME *" />
+          <View style={styles.inputCard}>
+            <AppTextInput style={styles.input} value={projectName} onChangeText={setProjectName} placeholder="e.g. Front Yard Concrete" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+          </View>
+
+          <FormLabel text="JOB TYPE" />
+          <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowJobTypePicker(true)}>
+            <Text style={jobType ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
+              {jobType || 'Select job type…'}
+            </Text>
+            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          <FormLabel text="TARGET DATE" />
+          <DatePickerField value={targetDate} onChange={handleTargetDateChange} placeholder="Select target date…" />
+
+          <FormLabel text="STATUS" />
+          <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowStatusPicker(true)}>
+            <Text style={status ? styles.pickerBtnValue : styles.pickerBtnPlaceholder}>{status || 'Select status…'}</Text>
+            <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
+
+          <FormLabel text="CUSTOMER / BILL TO" />
+          <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowCustomerPicker(true)}>
+            <Text style={billToName ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
+              {isNewCustomer ? 'New Customer' : (billToName || 'Select or add customer…')}
+            </Text>
+            {billToName && !isNewCustomer ? (
+              <TouchableOpacity
+                onPress={() => { setBillToName(''); setBillToAddress(''); setEmail(''); setPhone(''); setSalesperson(''); setIsNewCustomer(false); }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : (
+              <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+            )}
+          </TouchableOpacity>
+
+          {/* Name field shown for new customer or when no customer selected.
+              billToAddress / email / phone / salesperson are auto-populated in
+              state on customer selection but intentionally NOT rendered here. */}
+          {(isNewCustomer || !billToName) && (
+            <>
+              <FormLabel text="CUSTOMER NAME" />
               <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={projectName} onChangeText={setProjectName} placeholder="e.g. Front Yard Concrete" placeholderTextColor={colors.textMuted} returnKeyType="next" />
+                <AppTextInput style={styles.input} value={billToName} onChangeText={setBillToName} placeholder="Full customer name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
               </View>
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="JOB TYPE" />
-              <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowJobTypePicker(true)}>
-                <Text style={jobType ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
-                  {jobType || 'Select job type…'}
-                </Text>
-                <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="STATUS" />
-              <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowStatusPicker(true)}>
-                <Text style={status ? styles.pickerBtnValue : styles.pickerBtnPlaceholder}>{status || 'Select status…'}</Text>
-                <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="TARGET DATE" />
-              <DatePickerField value={targetDate} onChange={handleTargetDateChange} placeholder="Select target date…" />
-            </View>
-          </View>
-
-          {/* View Invoice link — only when an invoice PDF has been uploaded for
-              this job and the status indicates it's been sent or paid. */}
-          {invoicePdfUrl && (status === 'Invoice Sent' || status === 'Invoice Paid') && (
-            <TouchableOpacity
-              onPress={() => Linking.openURL(invoicePdfUrl).catch(() => Alert.alert('Cannot open', 'Could not open the invoice PDF.'))}
-              style={styles.viewInvoiceLink}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-            >
-              <Text style={styles.viewInvoiceLinkText}>View Invoice →</Text>
-            </TouchableOpacity>
+            </>
           )}
 
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="ESTIMATED DURATION DAYS" />
-              <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={estimatedDuration} onChangeText={setEstimatedDuration} placeholder="e.g. 2" placeholderTextColor={colors.textMuted} returnKeyType="next" keyboardType="numbers-and-punctuation" />
-              </View>
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="CREW" />
-              <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowCrewPicker(true)}>
-                <Text style={crewId ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
-                  {selectedCrew ? selectedCrew.name : 'Select crew…'}
-                </Text>
-                {crewId ? (
-                  <TouchableOpacity onPress={() => setCrewId('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-                  </TouchableOpacity>
-                ) : (
-                  <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-                )}
-              </TouchableOpacity>
-            </View>
+          <FormLabel text="JOB LOCATION ADDRESS" />
+          <AddressAutocomplete
+            value={jobLocationAddress}
+            onChangeText={setJobLocationAddress}
+            onBlur={handleAddressBlur}
+            placeholder="Site address"
+            placeholderTextColor={colors.textMuted}
+          />
+
+          {/* ── CREW ──────────────────────────────────────────────────── */}
+          <SectionHeader text="CREW" />
+
+          <FormLabel text="ESTIMATED DURATION DAYS" />
+          <View style={styles.inputCard}>
+            <AppTextInput style={styles.input} value={estimatedDuration} onChangeText={setEstimatedDuration} placeholder="e.g. 2" placeholderTextColor={colors.textMuted} returnKeyType="next" keyboardType="numbers-and-punctuation" />
           </View>
+
+          <FormLabel text="CREW" />
+          <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowCrewPicker(true)}>
+            <Text style={crewId ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
+              {selectedCrew ? selectedCrew.name : 'Select crew…'}
+            </Text>
+            {crewId ? (
+              <TouchableOpacity onPress={() => setCrewId('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : (
+              <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
+            )}
+          </TouchableOpacity>
 
           {/* Crew Assignment & Pay — internal only, never shown on invoice */}
           <FormLabel text="CREW ASSIGNMENT & PAY (INTERNAL)" />
@@ -1237,160 +1262,48 @@ export default function JobFormScreen() {
             </View>
           </View>
 
-          <FormLabel text="CUSTOMER / BILL TO" />
-          <TouchableOpacity style={styles.pickerBtn} onPress={() => setShowCustomerPicker(true)}>
-            <Text style={billToName ? styles.pickerBtnValue : styles.pickerBtnPlaceholder} numberOfLines={1}>
-              {isNewCustomer ? 'New Customer' : (billToName || 'Select or add customer…')}
-            </Text>
-            {billToName && !isNewCustomer ? (
-              <TouchableOpacity
-                onPress={() => { setBillToName(''); setBillToAddress(''); setEmail(''); setPhone(''); setSalesperson(''); setIsNewCustomer(false); }}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-              </TouchableOpacity>
-            ) : (
-              <Ionicons name="chevron-down" size={16} color={colors.textMuted} />
-            )}
-          </TouchableOpacity>
-
-          {/* Name field shown for new customer or when no customer selected */}
-          {(isNewCustomer || !billToName) && (
+          {/* ── INVOICE ───────────────────────────────────────────────── */}
+          {(invoicePdfUrl || isEdit) && (
             <>
-              <FormLabel text="CUSTOMER NAME" />
-              <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={billToName} onChangeText={setBillToName} placeholder="Full customer name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
-              </View>
+              <SectionHeader text="INVOICE" />
+
+              {/* Invoice Total — read-only, shown only once an invoice PDF
+                  exists for this job. */}
+              {invoicePdfUrl ? (
+                <>
+                  <FormLabel text="INVOICE TOTAL" />
+                  <View style={styles.inputCard}>
+                    <Text style={styles.readOnlyValue}>{fmtCurrency(parseFloat(invoiceTotal) || 0)}</Text>
+                  </View>
+
+                  {(status === 'Invoice Sent' || status === 'Invoice Paid') && (
+                    <TouchableOpacity
+                      onPress={() => Linking.openURL(invoicePdfUrl).catch(() => Alert.alert('Cannot open', 'Could not open the invoice PDF.'))}
+                      style={styles.viewInvoiceLink}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
+                      <Text style={styles.viewInvoiceLinkText}>View Invoice →</Text>
+                    </TouchableOpacity>
+                  )}
+                </>
+              ) : null}
+
+              {isEdit && (
+                <TouchableOpacity style={styles.editLineItemsBtn} onPress={handleOpenLineItems}>
+                  <Ionicons name="list-outline" size={16} color={colors.primary} />
+                  <Text style={styles.editLineItemsBtnText}>Edit Line Items</Text>
+                </TouchableOpacity>
+              )}
             </>
           )}
 
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="BILLING ADDRESS" />
-              <AddressAutocomplete
-                value={billToAddress}
-                onChangeText={setBillToAddress}
-                placeholder="123 Main St, City, State"
-                placeholderTextColor={colors.textMuted}
-              />
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="CUSTOMER EMAIL" />
-              <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="customer@example.com" placeholderTextColor={colors.textMuted} keyboardType="email-address" autoCapitalize="none" returnKeyType="next" />
-              </View>
-            </View>
-          </View>
-
-          <FormLabel text="CUSTOMER PHONE" />
-          <View style={styles.inputCard}>
-            <AppTextInput style={[styles.input, { flex: 1 }]} value={phone} onChangeText={setPhone} placeholder="555-123-4567" placeholderTextColor={colors.textMuted} keyboardType="phone-pad" autoCapitalize="none" returnKeyType="next" />
-            {phone.trim().length > 0 && (
-              <TouchableOpacity
-                onPress={() => Linking.openURL('tel:' + phone.trim()).catch(() => Alert.alert('Cannot dial', 'Phone calls are not supported on this device.'))}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                style={styles.phoneCallBtn}
-              >
-                <Ionicons name="call-outline" size={20} color="#16a34a" />
-              </TouchableOpacity>
-            )}
-          </View>
-
-          <FormLabel text="JOB LOCATION ADDRESS" />
-          <AddressAutocomplete
-            value={jobLocationAddress}
-            onChangeText={setJobLocationAddress}
-            onBlur={handleAddressBlur}
-            placeholder="Site address"
-            placeholderTextColor={colors.textMuted}
-          />
-
-          {/* AI Roof Estimator — only for roofing jobs with an address. */}
-          {showEstimateBtn && (
-            <View style={styles.roofEstimateRow}>
-              {estimateStatus === 'pending' ? (
-                <View style={[styles.roofEstimateBtn, styles.roofEstimateBtnPending]}>
-                  <ActivityIndicator size="small" color={colors.textMuted} />
-                  <Text style={[styles.roofEstimateBtnText, styles.roofEstimateBtnTextPending]}>Estimating…</Text>
-                </View>
-              ) : estimateStatus === 'complete' ? (
-                <TouchableOpacity
-                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnComplete]}
-                  onPress={() => setShowEstimateModal(true)}
-                  activeOpacity={0.75}
-                >
-                  <Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
-                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>View Estimate</Text>
-                </TouchableOpacity>
-              ) : estimateStatus === 'failed' ? (
-                <TouchableOpacity
-                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnFailed]}
-                  onPress={handleGetEstimate}
-                  activeOpacity={0.75}
-                  disabled={estimateLaunching}
-                >
-                  <Ionicons name="alert-circle-outline" size={18} color="#fff" />
-                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>Estimate Failed — Retry</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity
-                  style={[styles.roofEstimateBtn, styles.roofEstimateBtnIdle]}
-                  onPress={handleGetEstimate}
-                  activeOpacity={0.75}
-                  disabled={estimateLaunching}
-                >
-                  {estimateLaunching
-                    ? <ActivityIndicator size="small" color="#fff" />
-                    : <Ionicons name="home-outline" size={18} color="#fff" />}
-                  <Text style={[styles.roofEstimateBtnText, { color: '#fff' }]}>Get Estimate</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
-
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="SALESPERSON" />
-              <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={salesperson} onChangeText={setSalesperson} placeholder="Name" placeholderTextColor={colors.textMuted} returnKeyType="next" />
-              </View>
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="INVOICE NUMBER" />
-              <View style={styles.inputCard}>
-                <AppTextInput style={styles.input} value={invoiceNumber} onChangeText={setInvoiceNumber} placeholder="e.g. 26120-001" placeholderTextColor={colors.textMuted} returnKeyType="next" autoCapitalize="none" />
-              </View>
-            </View>
-          </View>
-
-          <View style={isLandscape ? styles.formRow : null}>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="INVOICE DATE" />
-              <DatePickerField value={invoiceDate} onChange={setInvoiceDate} placeholder="Select invoice date…" />
-            </View>
-            <View style={isLandscape ? styles.formCell : null}>
-              <FormLabel text="DUE DATE" />
-              <DatePickerField value={dueDate} onChange={setDueDate} placeholder="Select due date…" />
-            </View>
-          </View>
-
-          <FormLabel text="INVOICE TOTAL" />
-          <View style={styles.inputCard}>
-            <Text style={styles.inputPrefix}>$</Text>
-            <AppTextInput style={[styles.input, { flex: 1 }]} value={invoiceTotal} onChangeText={setInvoiceTotal} placeholder="0.00" placeholderTextColor={colors.textMuted} keyboardType="decimal-pad" returnKeyType="next" />
-          </View>
+          {/* ── NOTES & PHOTOS ────────────────────────────────────────── */}
+          <SectionHeader text="NOTES & PHOTOS" />
 
           <FormLabel text="NOTES" />
           <View style={styles.inputCard}>
             <AppTextInput style={[styles.input, styles.inputMultiTall]} value={notes} onChangeText={setNotes} placeholder="Additional notes…" placeholderTextColor={colors.textMuted} multiline returnKeyType="default" />
           </View>
-
-          {isEdit && (
-            <TouchableOpacity style={styles.editLineItemsBtn} onPress={handleOpenLineItems}>
-              <Ionicons name="list-outline" size={16} color={colors.primary} />
-              <Text style={styles.editLineItemsBtnText}>Edit Line Items</Text>
-            </TouchableOpacity>
-          )}
 
           {/* Photos */}
           <View style={styles.photosLabelRow}>
@@ -1890,6 +1803,18 @@ const styles = StyleSheet.create({
     fontSize: 11, fontWeight: '700', color: colors.textMuted,
     letterSpacing: 0.8, marginBottom: 6, marginTop: 14, marginLeft: 4,
   },
+
+  sectionHeader: {
+    marginTop: 26, marginBottom: 2,
+    borderBottomWidth: 1, borderBottomColor: '#e5e7eb',
+    paddingBottom: 8,
+  },
+  sectionHeaderText: {
+    fontSize: 13, fontWeight: '800', color: colors.textPrimary,
+    letterSpacing: 1.2,
+  },
+
+  readOnlyValue: { fontSize: 15, color: colors.textPrimary, paddingVertical: 14, flex: 1, fontWeight: '600' },
 
   inputCard: {
     backgroundColor: '#fff', borderRadius: 12, paddingHorizontal: 16,
