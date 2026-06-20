@@ -126,6 +126,7 @@ export default function JobFormScreen() {
   const [invoiceDate,        setInvoiceDate]        = useState('');
   const [dueDate,            setDueDate]            = useState('');
   const [invoiceTotal,       setInvoiceTotal]       = useState('');
+  const [jobTotal,           setJobTotal]           = useState('');
   const [notes,              setNotes]              = useState('');
 
   const [crewLeads,    setCrewLeads]    = useState('1');
@@ -207,6 +208,12 @@ export default function JobFormScreen() {
             setInvoiceDate(job.invoiceDate || '');
             setDueDate(job.dueDate || '');
             setInvoiceTotal(job.invoiceTotal != null ? String(job.invoiceTotal) : '');
+            // Job Total: prefer an explicit jobTotal; otherwise, when an
+            // Apollonia invoice exists, seed it from the invoice total amount.
+            setJobTotal(
+              job.jobTotal != null ? String(job.jobTotal)
+                : (job.invoicePdfUrl && job.invoiceTotal != null ? String(job.invoiceTotal) : ''),
+            );
             setInvoicePdfUrl(job.invoicePdfUrl || '');
             setRoofEstimate(job.roofEstimate || null);
             setAerialPhotoBase64(job.aerialPhotoBase64 || '');
@@ -596,6 +603,7 @@ export default function JobFormScreen() {
         invoiceDate:        invoiceDate.trim(),
         dueDate:            dueDate.trim(),
         invoiceTotal:       invoiceTotal ? parseFloat(invoiceTotal) : null,
+        jobTotal:           jobTotal ? parseFloat(jobTotal) : null,
         notes:              notes.trim(),
         photos:             photoEntries,
         photoCount:         photoEntries.length,
@@ -1263,38 +1271,33 @@ export default function JobFormScreen() {
           </View>
 
           {/* ── INVOICE ───────────────────────────────────────────────── */}
-          {(invoicePdfUrl || isEdit) && (
-            <>
-              <SectionHeader text="INVOICE" />
+          <SectionHeader text="INVOICE" />
 
-              {/* Invoice Total — read-only, shown only once an invoice PDF
-                  exists for this job. */}
-              {invoicePdfUrl ? (
-                <>
-                  <FormLabel text="INVOICE TOTAL" />
-                  <View style={styles.inputCard}>
-                    <Text style={styles.readOnlyValue}>{fmtCurrency(parseFloat(invoiceTotal) || 0)}</Text>
-                  </View>
+          {/* Job Total — always editable. For customers paying preset amounts
+              (e.g. Bulldog work orders) the user types it in manually; when an
+              Apollonia invoice exists it's auto-populated from the invoice total
+              on load but remains editable here. */}
+          <FormLabel text="JOB TOTAL" />
+          <View style={styles.inputCard}>
+            <Text style={styles.inputPrefix}>$</Text>
+            <AppTextInput style={[styles.input, { flex: 1 }]} value={jobTotal} onChangeText={setJobTotal} placeholder="0.00" placeholderTextColor={colors.textMuted} keyboardType="decimal-pad" returnKeyType="next" />
+          </View>
 
-                  {(status === 'Invoice Sent' || status === 'Invoice Paid') && (
-                    <TouchableOpacity
-                      onPress={() => Linking.openURL(invoicePdfUrl).catch(() => Alert.alert('Cannot open', 'Could not open the invoice PDF.'))}
-                      style={styles.viewInvoiceLink}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                    >
-                      <Text style={styles.viewInvoiceLinkText}>View Invoice →</Text>
-                    </TouchableOpacity>
-                  )}
-                </>
-              ) : null}
+          {invoicePdfUrl && (status === 'Invoice Sent' || status === 'Invoice Paid') && (
+            <TouchableOpacity
+              onPress={() => Linking.openURL(invoicePdfUrl).catch(() => Alert.alert('Cannot open', 'Could not open the invoice PDF.'))}
+              style={styles.viewInvoiceLink}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            >
+              <Text style={styles.viewInvoiceLinkText}>View Invoice →</Text>
+            </TouchableOpacity>
+          )}
 
-              {isEdit && (
-                <TouchableOpacity style={styles.editLineItemsBtn} onPress={handleOpenLineItems}>
-                  <Ionicons name="list-outline" size={16} color={colors.primary} />
-                  <Text style={styles.editLineItemsBtnText}>Edit Line Items</Text>
-                </TouchableOpacity>
-              )}
-            </>
+          {isEdit && (
+            <TouchableOpacity style={styles.editLineItemsBtn} onPress={handleOpenLineItems}>
+              <Ionicons name="list-outline" size={16} color={colors.primary} />
+              <Text style={styles.editLineItemsBtnText}>Edit Line Items</Text>
+            </TouchableOpacity>
           )}
 
           {/* ── NOTES & PHOTOS ────────────────────────────────────────── */}
