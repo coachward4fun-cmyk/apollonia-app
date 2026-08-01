@@ -8,30 +8,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { subscribeJobTypes, deleteJobType, saveJobType } from '../services/db';
 import { useAIAssistant } from '../context/AIAssistantContext';
 import { colors } from '../theme/colors';
+import { ROOFING_LINE_ITEMS } from '../data/roofingLineItems';
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
 const DEFAULT_SEED_TYPES = [
-  {
-    name: 'Roofing',
-    lineItems: [
-      { description: 'Install new shingles (Squares)', qty: 0, unitPrice: 80 },
-      { description: 'Remove all shingles down to deck', qty: 1, unitPrice: 0 },
-      { description: 'Remove extra layer of shingles', qty: 0, unitPrice: 15 },
-      { description: 'Replace plywood (Sheets)', qty: 0, unitPrice: 15 },
-      { description: 'Dump Fee Total Cost', qty: 1, unitPrice: 469 },
-      { description: 'Destination Fee', qty: 1, unitPrice: 0 },
-      { description: 'Clean up and haul away all debris', qty: 1, unitPrice: 0 },
-      { description: 'Install drip edge (ft)', qty: 0, unitPrice: 2 },
-      { description: 'Install ice & water shield (Squares)', qty: 0, unitPrice: 75 },
-      { description: 'Install felt underlayment (Rolls)', qty: 0, unitPrice: 45 },
-      { description: 'Install ridge cap', qty: 1, unitPrice: 0 },
-      { description: 'Install step flashing', qty: 0, unitPrice: 0 },
-      { description: 'Permit Fee', qty: 0, unitPrice: 0 },
-    ],
-  },
+  { name: 'Roofing',   lineItems: ROOFING_LINE_ITEMS },
   { name: 'Gutters',   lineItems: [] },
   { name: 'Siding',    lineItems: [] },
   { name: 'Concrete',  lineItems: [] },

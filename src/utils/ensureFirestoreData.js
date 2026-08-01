@@ -7,6 +7,7 @@
 
 import { db } from '../config/firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { ROOFING_LINE_ITEMS } from '../data/roofingLineItems';
 
 // ── Meta document: build expiry ───────────────────────────────────────────────
 
@@ -28,6 +29,36 @@ async function ensureBuildExpiryDoc() {
   }
 }
 
+// ── One-time migration: 40-item Roofing line item list ─────────────────────────
+// The Roofing job type's line items were previously seeded once (if empty) and
+// never touched again, so replacing the seed constant alone doesn't reach data
+// that's already saved. This overwrites the live Roofing job type with the new
+// 40-item list a single time, tracked by meta/migrations.roofingLineItemsV2.
+
+async function ensureRoofingLineItemsV2() {
+  try {
+    const migRef  = doc(db, 'meta', 'migrations');
+    const migSnap = await getDoc(migRef);
+    if (migSnap.exists() && migSnap.data().roofingLineItemsV2) return;
+
+    const typesRef  = doc(db, 'appConfig', 'jobTypes');
+    const typesSnap = await getDoc(typesRef);
+    const types     = typesSnap.exists() ? (typesSnap.data().types || []) : [];
+    const idx       = types.findIndex((t) => (t.name || '').toLowerCase() === 'roofing');
+
+    if (idx >= 0) {
+      types[idx] = { ...types[idx], lineItems: ROOFING_LINE_ITEMS };
+    } else {
+      types.push({ id: 'roofing-' + Date.now().toString(36), name: 'Roofing', lineItems: ROOFING_LINE_ITEMS });
+    }
+    await setDoc(typesRef, { types });
+    await setDoc(migRef, { roofingLineItemsV2: true }, { merge: true });
+    console.log('[Migration] Roofing line items updated to 40-item list');
+  } catch (err) {
+    console.warn('[Migration] roofingLineItemsV2 error:', err.message);
+  }
+}
+
 // ── Main export ────────────────────────────────────────────────────────────────
 
 /**
@@ -37,5 +68,6 @@ async function ensureBuildExpiryDoc() {
  */
 export async function ensureFirestoreData(_onProgress) {
   await ensureBuildExpiryDoc();
+  await ensureRoofingLineItemsV2();
   return null;
 }

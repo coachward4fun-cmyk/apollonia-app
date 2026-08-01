@@ -8,8 +8,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { getJobTypes, saveJobType } from '../services/db';
 import { colors } from '../theme/colors';
 
-const MAX_ITEMS = 13;
-
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
@@ -34,8 +32,10 @@ export default function EditJobTypeScreen() {
           setName(jt.name || '');
           setLineItems((jt.lineItems || []).map((i) => ({
             description: i.description || '',
+            unit:        i.unit || '',
             qty:         String(i.qty ?? 0),
             unitPrice:   String(i.unitPrice ?? 0),
+            isBid:       !!i.isBid,
           })));
         }
       } catch { /* ignore */ }
@@ -48,11 +48,7 @@ export default function EditJobTypeScreen() {
   };
 
   const addItem = () => {
-    if (lineItems.length >= MAX_ITEMS) {
-      Alert.alert('Limit Reached', `Maximum ${MAX_ITEMS} line items per job type.`);
-      return;
-    }
-    setLineItems((prev) => [...prev, { description: '', qty: '1', unitPrice: '0' }]);
+    setLineItems((prev) => [...prev, { description: '', unit: '', qty: '1', unitPrice: '0', isBid: false }]);
   };
 
   const removeItem = (index) => {
@@ -71,8 +67,10 @@ export default function EditJobTypeScreen() {
         name: name.trim(),
         lineItems: lineItems.map((i) => ({
           description: i.description,
+          unit:        i.unit || '',
           qty:         parseFloat(i.qty) || 0,
           unitPrice:   parseFloat(i.unitPrice) || 0,
+          isBid:       !!i.isBid,
         })),
       };
       await saveJobType(jobType);
@@ -123,13 +121,11 @@ export default function EditJobTypeScreen() {
           </View>
 
           <View style={styles.lineItemsHeader}>
-            <Text style={styles.sectionLabel}>LINE ITEMS ({lineItems.length}/{MAX_ITEMS})</Text>
-            {lineItems.length < MAX_ITEMS && (
-              <TouchableOpacity onPress={addItem} style={styles.addItemBtn}>
-                <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
-                <Text style={styles.addItemText}>Add Line Item</Text>
-              </TouchableOpacity>
-            )}
+            <Text style={styles.sectionLabel}>LINE ITEMS ({lineItems.length})</Text>
+            <TouchableOpacity onPress={addItem} style={styles.addItemBtn}>
+              <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
+              <Text style={styles.addItemText}>Add Line Item</Text>
+            </TouchableOpacity>
           </View>
 
           {lineItems.length === 0 ? (
@@ -151,6 +147,18 @@ export default function EditJobTypeScreen() {
                   </TouchableOpacity>
                 </View>
                 <View style={styles.lineItemRow}>
+                  <View style={styles.lineItemField}>
+                    <Text style={styles.fieldLabel}>Unit</Text>
+                    <AppTextInput
+                      style={styles.fieldInput}
+                      value={item.unit}
+                      onChangeText={(v) => updateItem(i, 'unit', v)}
+                      placeholder="SQ"
+                      placeholderTextColor="#9ca3af"
+                      autoCapitalize="characters"
+                      selectTextOnFocus
+                    />
+                  </View>
                   <View style={styles.lineItemField}>
                     <Text style={styles.fieldLabel}>Default Qty</Text>
                     <AppTextInput
@@ -175,6 +183,14 @@ export default function EditJobTypeScreen() {
                     </View>
                   </View>
                 </View>
+                <TouchableOpacity
+                  style={styles.bidToggleRow}
+                  onPress={() => updateItem(i, 'isBid', !item.isBid)}
+                  hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                >
+                  <Ionicons name={item.isBid ? 'checkbox' : 'square-outline'} size={16} color={item.isBid ? colors.primary : '#9ca3af'} />
+                  <Text style={styles.bidToggleText}>Bid item (no fixed price)</Text>
+                </TouchableOpacity>
               </View>
             ))
           )}
@@ -244,4 +260,6 @@ const styles = StyleSheet.create({
   },
   priceWrap: { flexDirection: 'row', alignItems: 'center' },
   dollarSign: { fontSize: 13, color: '#6b7280', marginRight: 2 },
+  bidToggleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
+  bidToggleText: { fontSize: 12, color: '#6b7280', fontWeight: '500' },
 });

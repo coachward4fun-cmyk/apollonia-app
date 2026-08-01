@@ -118,6 +118,17 @@ function buildPhotoPages(photoData, job = {}) {
 // logoSrc may be a public URL (e.g. https://firebasestorage…) or a data: URI.
 // PDFs use a data: URI so the image embeds offline; email HTML uses the public
 // URL so Gmail / iCloud Mail render it (those clients strip data: image src).
+// Item rows per invoice PDF page. Conservative on purpose — each page div is
+// printed via forced `page-break-before` (same pattern buildPhotoPages already
+// uses), so pagination is computed here in JS rather than relying on the
+// WebKit print engine's auto-pagination, which doesn't support CSS running
+// headers/counter(pages) needed for "Page X of Y" and repeated headers.
+const ITEMS_PER_PDF_PAGE = 14;
+
+function isBidUnpriced(item) {
+  return !!item.isBid && !(Number(item.unitPrice) || 0);
+}
+
 function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote = '', logoSrc = '', extraPages = '', profile = {}) {
   const taxRateNum = job.taxRate != null ? job.taxRate : 0;
   const taxLabel   = job.taxLabel || '';
@@ -131,34 +142,14 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   const billingEmail = escapeHtml(profile.billingEmail || '');
   const tagline      = escapeHtml(profile.tagline      || '');
 
-  const itemRows = visibleItems.map((item) => {
-    const lt = (Number(item.qty) || 0) * (Number(item.unitPrice) || 0);
-    return `
-      <tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;color:#111827;">${item.description}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:center;color:#374151;">${item.qty}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;color:#374151;">${fmtDecimal(item.unitPrice)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;font-weight:600;color:#111827;">${fmtDecimal(lt)}</td>
-      </tr>`;
-  }).join('');
+  const pages = [];
+  for (let start = 0; start < visibleItems.length; start += ITEMS_PER_PDF_PAGE) {
+    pages.push(visibleItems.slice(start, start + ITEMS_PER_PDF_PAGE));
+  }
+  if (pages.length === 0) pages.push([]);
+  const totalPages = pages.length;
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Invoice ${invoiceNumber}</title>
-  <style>
-    @page { size: letter; margin: 0.5in; }
-    @media print { * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-  </style>
-</head>
-<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-
-  <!-- Invoice card — page 1 -->
-  <div style="max-width:680px;margin:0 auto;background:#fff;">
-
-    <!-- Header — three sections: logo (white), tagline (green), INVOICE (white) -->
+  const headerHtml = `
     <div style="background:#fff;height:60px;">
       <table style="width:100%;height:60px;border-collapse:collapse;"><tr>
         <td style="width:190px;background:#fff;vertical-align:middle;text-align:center;border-right:1px solid rgba(255,255,255,0.3);">
@@ -177,11 +168,16 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
         </td>
       </tr></table>
     </div>
+    <div style="padding:6px 32px 0;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr>
+          <td style="font-size:11px;color:#6b7280;">${companyAddr}</td>
+          <td style="font-size:11px;color:#6b7280;text-align:right;">Invoice ${escapeHtml(invoiceNumber)}</td>
+        </tr>
+      </table>
+    </div>`;
 
-    <!-- Body -->
-    <div style="padding:8px 32px;">
-
-      <!-- Bill-to + Invoice meta -->
+  const billToMetaHtml = `
       <table style="width:100%;border-collapse:collapse;margin-bottom:0;">
         <tr>
           <td style="vertical-align:top;width:55%;">
@@ -213,7 +209,6 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
         </tr>
       </table>
 
-      <!-- Project -->
       <div style="background:#f0fdf4;border-radius:8px;padding:8px 16px;margin-bottom:8px;border-left:4px solid #16a34a;">
         <div style="font-size:9pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;">Project</div>
         <div style="font-size:14px;color:#111827;line-height:1.4;">
@@ -222,22 +217,33 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
           ${job.targetDate ? `<span style="color:#6b7280;margin-left:8px;">· ${formatDate(job.targetDate)}</span>` : ''}
         </div>
         ${job.jobLocationAddress ? `<div style="font-size:13px;color:#6b7280;margin-top:4px;">${job.jobLocationAddress}</div>` : ''}
-      </div>
+      </div>`;
 
-      <!-- Line items -->
-      <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
+  const columnHeaderHtml = `
         <thead>
           <tr style="background:#f9fafb;">
-            <th style="padding:8px 12px;text-align:left;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">Description</th>
-            <th style="padding:8px 12px;text-align:center;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:50px;">Qty</th>
-            <th style="padding:8px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Unit Price</th>
-            <th style="padding:8px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Total</th>
+            <th style="padding:6px 12px;text-align:left;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;">Description</th>
+            <th style="padding:6px 12px;text-align:center;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:44px;">Qty</th>
+            <th style="padding:6px 12px;text-align:center;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:44px;">Unit</th>
+            <th style="padding:6px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Unit Cost</th>
+            <th style="padding:6px 12px;text-align:right;font-size:9pt;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e5e7eb;width:80px;">Total</th>
           </tr>
-        </thead>
-        <tbody>${itemRows}</tbody>
-      </table>
+        </thead>`;
 
-      <!-- Bottom: Send Payment To (left) + Totals (right) -->
+  const rowHtml = (item) => {
+    const lt = (Number(item.qty) || 0) * (Number(item.unitPrice) || 0);
+    const bid = isBidUnpriced(item);
+    return `
+      <tr>
+        <td style="padding:4px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;color:#111827;">${escapeHtml(item.description)}</td>
+        <td style="padding:4px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:center;color:#374151;">${item.qty}</td>
+        <td style="padding:4px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:center;color:#374151;">${escapeHtml(item.unit || '')}</td>
+        <td style="padding:4px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;color:#374151;">${bid ? 'Bid' : fmtDecimal(item.unitPrice)}</td>
+        <td style="padding:4px 12px;border-bottom:1px solid #f3f4f6;font-size:10pt;text-align:right;font-weight:600;color:#111827;">${bid ? 'Bid' : fmtDecimal(lt)}</td>
+      </tr>`;
+  };
+
+  const totalsHtml = `
       <table style="width:100%;border-collapse:collapse;margin-top:8px;border-top:2px solid #e5e7eb;">
         <tr>
           <td style="vertical-align:top;width:50%;padding-right:24px;padding-top:8px;">
@@ -269,11 +275,40 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
         </tr>
       </table>
       ${taxRateNum === 0 ? `<div style="margin-top:14px;font-style:italic;font-size:9pt;color:#6b7280;">* This invoice reflects non-retail services in support of Real Property improvement</div>` : ''}
-      ${footerNote ? `<div style="margin-top:16px;">${footerNote}</div>` : ''}
+      ${footerNote ? `<div style="margin-top:16px;">${footerNote}</div>` : ''}`;
 
+  const pageHtml = pages.map((items, i) => {
+    const isFirst = i === 0;
+    const isLast  = i === totalPages - 1;
+    return `
+  <div style="max-width:680px;margin:0 auto;background:#fff;${isFirst ? '' : 'page-break-before:always;break-before:page;'}">
+    ${headerHtml}
+    <div style="padding:8px 32px;">
+      ${isFirst ? billToMetaHtml : ''}
+      <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
+        ${columnHeaderHtml}
+        <tbody>${items.map(rowHtml).join('')}</tbody>
+      </table>
+      ${isLast ? totalsHtml : `<div style="text-align:center;font-size:9pt;font-style:italic;color:#9ca3af;margin:8px 0 16px;">Continued on next page&hellip;</div>`}
+      <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${i + 1} of ${totalPages}</div>
     </div>
+  </div>`;
+  }).join('');
 
-  </div>
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Invoice ${invoiceNumber}</title>
+  <style>
+    @page { size: letter; margin: 0.5in; }
+    @media print { * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  </style>
+</head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+
+  ${pageHtml}
 
   ${extraPages}
 

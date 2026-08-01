@@ -17,6 +17,7 @@ import { colors } from '../theme/colors';
 import { statusStyle } from '../theme/statusColors';
 import { openInMaps } from '../utils/openInMaps';
 import { formatPhoneDisplay } from '../utils/phoneUtils';
+import { ROOFING_LINE_ITEMS } from '../data/roofingLineItems';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -451,6 +452,150 @@ function JobPickerModal({ visible, jobs, onSelect, onClose }) {
   );
 }
 
+// ── AddLineItemModal ──────────────────────────────────────────────────────────
+
+function AddLineItemModal({ visible, existingItems, onAdd, onClose }) {
+  const [showCustom,  setShowCustom]  = useState(false);
+  const [customDesc,  setCustomDesc]  = useState('');
+  const [customUnit,  setCustomUnit]  = useState('');
+  const [customQty,   setCustomQty]   = useState('1');
+  const [customPrice, setCustomPrice] = useState('0');
+
+  const resetCustom = () => {
+    setShowCustom(false);
+    setCustomDesc('');
+    setCustomUnit('');
+    setCustomQty('1');
+    setCustomPrice('0');
+  };
+
+  const handleClose = () => {
+    resetCustom();
+    onClose();
+  };
+
+  const usedDescriptions = new Set(existingItems.map((i) => (i.description || '').trim().toLowerCase()));
+  const availableItems = ROOFING_LINE_ITEMS.filter(
+    (i) => !usedDescriptions.has(i.description.trim().toLowerCase()),
+  );
+
+  const handlePickItem = (item) => {
+    onAdd({ description: item.description, unit: item.unit, qty: '0', unitPrice: String(item.unitPrice), isBid: item.isBid });
+    handleClose();
+  };
+
+  const handleAddCustom = () => {
+    if (!customDesc.trim()) {
+      Alert.alert('Required', 'Enter a description.');
+      return;
+    }
+    onAdd({
+      description: customDesc.trim(),
+      unit:        customUnit.trim(),
+      qty:         customQty,
+      unitPrice:   customPrice,
+      isBid:       false,
+    });
+    handleClose();
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
+      <SafeAreaView style={styles.pickerContainer}>
+        <View style={styles.pickerHeader}>
+          <Text style={styles.pickerTitle}>{showCustom ? 'Custom Item' : 'Add Line Item'}</Text>
+          <TouchableOpacity onPress={handleClose} style={styles.pickerClose}>
+            <Ionicons name="close" size={22} color={colors.textSecondary} />
+          </TouchableOpacity>
+        </View>
+
+        {showCustom ? (
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <ScrollView contentContainerStyle={styles.customItemForm} keyboardShouldPersistTaps="handled">
+              <Text style={styles.customItemLabel}>DESCRIPTION</Text>
+              <AppTextInput
+                style={styles.customItemInput}
+                value={customDesc}
+                onChangeText={setCustomDesc}
+                placeholder="e.g. Extra material charge"
+                placeholderTextColor="#9ca3af"
+                returnKeyType="next"
+              />
+
+              <View style={styles.customItemRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.customItemLabel}>QTY</Text>
+                  <AppTextInput
+                    style={styles.customItemInput}
+                    value={customQty}
+                    onChangeText={setCustomQty}
+                    keyboardType="decimal-pad"
+                    selectTextOnFocus
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.customItemLabel}>UNIT</Text>
+                  <AppTextInput
+                    style={styles.customItemInput}
+                    value={customUnit}
+                    onChangeText={setCustomUnit}
+                    placeholder="EA"
+                    placeholderTextColor="#9ca3af"
+                    autoCapitalize="characters"
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.customItemLabel}>PRICE</Text>
+                  <AppTextInput
+                    style={styles.customItemInput}
+                    value={customPrice}
+                    onChangeText={setCustomPrice}
+                    keyboardType="decimal-pad"
+                    selectTextOnFocus
+                  />
+                </View>
+              </View>
+
+              <TouchableOpacity style={styles.customItemSaveBtn} onPress={handleAddCustom}>
+                <Text style={styles.customItemSaveBtnText}>Add to Invoice</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.customItemBackBtn} onPress={() => setShowCustom(false)}>
+                <Text style={styles.customItemBackBtnText}>← Back to list</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        ) : (
+          <ScrollView contentContainerStyle={styles.pickerList} showsVerticalScrollIndicator={false}>
+            {availableItems.length === 0 ? (
+              <Text style={styles.noItems}>All roofing line items are already on this invoice.</Text>
+            ) : (
+              availableItems.map((item) => (
+                <TouchableOpacity
+                  key={item.description}
+                  style={styles.addItemRow}
+                  onPress={() => handlePickItem(item)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.addItemRowDesc} numberOfLines={2}>{item.description}</Text>
+                  <View style={styles.addItemRowRight}>
+                    <Text style={styles.addItemRowUnit}>{item.unit}</Text>
+                    <Text style={styles.addItemRowPrice}>{item.isBid ? 'Bid' : fmtDecimal(item.unitPrice)}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))
+            )}
+            <TouchableOpacity style={styles.customItemBtn} onPress={() => setShowCustom(true)}>
+              <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
+              <Text style={styles.customItemBtnText}>Custom Item</Text>
+            </TouchableOpacity>
+            <View style={{ height: 24 }} />
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 // ── InvoiceWizard ──────────────────────────────────────────────────────────────
 
 function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob, onClose, onSave, onEditJob }) {
@@ -468,6 +613,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
   const [sendProgress,    setSendProgress]    = useState({ done: 0, total: 0 });
   const [toast,        setToast]        = useState('');
   const [fixedInvoice, setFixedInvoice] = useState(false);
+  const [showAddItem,  setShowAddItem]  = useState(false);
   const scrollRef = useRef(null);
   const isPaid = (selJob?.status || '').toLowerCase() === 'invoice paid';
 
@@ -524,8 +670,10 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
       if (preselectedJob.lineItems && preselectedJob.lineItems.length > 0) {
         setLineItems(preselectedJob.lineItems.map((i) => ({
           description: i.description,
+          unit:        i.unit || '',
           qty:         String(i.qty ?? 0),
           unitPrice:   String(i.unitPrice ?? 0),
+          isBid:       !!i.isBid,
         })));
         return;
       }
@@ -539,8 +687,10 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
           if (typeConfig && typeConfig.lineItems && typeConfig.lineItems.length > 0) {
             baseItems = typeConfig.lineItems.map((i) => ({
               description: i.description,
+              unit:        i.unit || '',
               qty:         String(i.qty ?? 0),
               unitPrice:   String(i.unitPrice ?? 0),
+              isBid:       !!i.isBid,
             }));
           }
         } catch { /* fall through with empty base */ }
@@ -625,8 +775,10 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     const taxRateNum = parseFloat(taxRate) || 0;
     const cleanItems = lineItems.map((i) => ({
       description: i.description,
+      unit:        i.unit || '',
       qty:         parseFloat(i.qty) || 0,
       unitPrice:   parseFloat(i.unitPrice) || 0,
+      isBid:       !!i.isBid,
     }));
     try {
       await saveJob({ ...selJob, lineItems: cleanItems, taxRate: taxRateNum });
@@ -696,8 +848,10 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
       invoiceTotal:  Math.round(total * 100) / 100,
       lineItems:     lineItems.map((i) => ({
         description: i.description,
+        unit:        i.unit || '',
         qty:         parseFloat(i.qty) || 0,
         unitPrice:   parseFloat(i.unitPrice) || 0,
+        isBid:       !!i.isBid,
       })),
     };
   };
@@ -978,6 +1132,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                         ) : (
                           <Text style={styles.lineItemDesc}>{item.description}</Text>
                         )}
+                        {!!item.unit && <Text style={styles.lineItemUnitTag}>{item.unit}</Text>}
                         {!isPaid && (
                           <TouchableOpacity
                             onPress={() => removeItem(i)}
@@ -1007,14 +1162,18 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                         <View style={styles.lineItemField}>
                           <Text style={styles.lineItemFieldLabel}>Price</Text>
                           <View style={styles.lineItemPriceWrap}>
-                            <Text style={styles.lineItemDollar}>$</Text>
+                            {!(item.isBid && !(parseFloat(item.unitPrice) || 0)) && <Text style={styles.lineItemDollar}>$</Text>}
                             {isPaid ? (
-                              <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>{item.unitPrice}</Text>
+                              <Text style={[styles.lineItemInput, { color: colors.textSecondary }]}>
+                                {item.isBid && !(parseFloat(item.unitPrice) || 0) ? 'Bid' : item.unitPrice}
+                              </Text>
                             ) : (
                               <AppTextInput
                                 style={styles.lineItemInput}
                                 value={item.unitPrice}
                                 onChangeText={(v) => updateItem(i, 'unitPrice', v)}
+                                placeholder={item.isBid ? 'Bid' : undefined}
+                                placeholderTextColor={colors.textMuted}
                                 keyboardType="decimal-pad"
                                 selectTextOnFocus
                               />
@@ -1023,12 +1182,19 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                         </View>
                         <Text style={styles.lineItemTimes}>=</Text>
                         <Text style={[styles.lineItemTotal, lt > 0 && styles.lineItemTotalActive]}>
-                          {fmtWhole(lt)}
+                          {item.isBid && !lt ? 'Bid' : fmtWhole(lt)}
                         </Text>
                       </View>
                     </View>
                   );
                 })}
+
+                {!isPaid && (
+                  <TouchableOpacity style={styles.addLineItemBtn} onPress={() => setShowAddItem(true)}>
+                    <Ionicons name="add-circle-outline" size={18} color={colors.primary} />
+                    <Text style={styles.addLineItemBtnText}>Add Line Item</Text>
+                  </TouchableOpacity>
+                )}
 
                 <View style={styles.taxSummaryCard}>
                   <View style={styles.taxRateRow}>
@@ -1143,20 +1309,26 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
                 <View style={styles.previewTable}>
                   <View style={[styles.previewTableRow, styles.previewTableHead]}>
                     <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 1 }]}>Description</Text>
-                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 0, width: 50, textAlign: 'center' }]}>Qty</Text>
-                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Unit Price</Text>
-                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 80 }]}>Total</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 0, width: 40, textAlign: 'center' }]}>Qty</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, { flex: 0, width: 36, textAlign: 'center' }]}>Unit</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 70 }]}>Unit Cost</Text>
+                    <Text style={[styles.previewTableCell, styles.previewTableHeadCell, styles.previewTableRight, { flex: 0, width: 70 }]}>Total</Text>
                   </View>
                   {lineItems
                     .filter((item) => (parseFloat(item.qty) || 0) > 0)
-                    .map((item, i) => (
-                      <View key={i} style={styles.previewTableRow}>
-                        <Text style={[styles.previewTableCell, { flex: 1 }]} numberOfLines={1} ellipsizeMode="clip">{item.description}</Text>
-                        <Text style={[styles.previewTableCell, { flex: 0, width: 50, textAlign: 'center' }]} numberOfLines={1} ellipsizeMode="clip">{item.qty}</Text>
-                        <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 80 }]} numberOfLines={1} ellipsizeMode="clip">{fmtDecimal(item.unitPrice)}</Text>
-                        <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 80 }]} numberOfLines={1} ellipsizeMode="clip">{fmtDecimal(lineTotal(item))}</Text>
-                      </View>
-                    ))}
+                    .map((item, i) => {
+                      const isBidUnpriced = item.isBid && !(parseFloat(item.unitPrice) || 0);
+                      const lt = lineTotal(item);
+                      return (
+                        <View key={i} style={styles.previewTableRow}>
+                          <Text style={[styles.previewTableCell, { flex: 1 }]} numberOfLines={1} ellipsizeMode="clip">{item.description}</Text>
+                          <Text style={[styles.previewTableCell, { flex: 0, width: 40, textAlign: 'center' }]} numberOfLines={1} ellipsizeMode="clip">{item.qty}</Text>
+                          <Text style={[styles.previewTableCell, { flex: 0, width: 36, textAlign: 'center' }]} numberOfLines={1} ellipsizeMode="clip">{item.unit || ''}</Text>
+                          <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 70 }]} numberOfLines={1} ellipsizeMode="clip">{isBidUnpriced ? 'Bid' : fmtDecimal(item.unitPrice)}</Text>
+                          <Text style={[styles.previewTableCell, styles.previewTableRight, { flex: 0, width: 70 }]} numberOfLines={1} ellipsizeMode="clip">{isBidUnpriced ? 'Bid' : fmtDecimal(lt)}</Text>
+                        </View>
+                      );
+                    })}
                 </View>
 
                 <View style={styles.previewBottomRow}>
@@ -1299,6 +1471,13 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
             </View>
           </View>
         </Modal>
+
+        <AddLineItemModal
+          visible={showAddItem}
+          existingItems={lineItems}
+          onAdd={(item) => setLineItems((prev) => [...prev, item])}
+          onClose={() => setShowAddItem(false)}
+        />
       </SafeAreaView>
     </Modal>
   );
@@ -1573,6 +1752,10 @@ const styles = StyleSheet.create({
     paddingVertical: 2, fontWeight: '600',
   },
   lineItemRemoveBtn: { flexShrink: 0 },
+  lineItemUnitTag: {
+    fontSize: 10, fontWeight: '700', color: colors.textMuted, backgroundColor: '#f3f4f6',
+    borderRadius: 4, paddingHorizontal: 5, paddingVertical: 2, flexShrink: 0,
+  },
   lineItemRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   lineItemField: { alignItems: 'center', gap: 2 },
   lineItemFieldLabel: { fontSize: 9, fontWeight: '600', color: colors.textMuted, textTransform: 'uppercase' },
@@ -1920,5 +2103,49 @@ const styles = StyleSheet.create({
   pickerEmpty: { alignItems: 'center', paddingTop: 80, gap: 12 },
   pickerEmptyTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   pickerEmptySub: { fontSize: 13, color: colors.textSecondary, textAlign: 'center' },
+
+  addLineItemBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 12, marginTop: 4, marginBottom: 4,
+    borderWidth: 1, borderColor: colors.primary, borderStyle: 'dashed', borderRadius: 10,
+  },
+  addLineItemBtnText: { fontSize: 14, fontWeight: '600', color: colors.primary },
+
+  noItems: { fontSize: 13, color: '#9ca3af', textAlign: 'center', paddingVertical: 20, lineHeight: 19 },
+
+  addItemRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+    backgroundColor: '#fff', borderRadius: 10, padding: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 3, elevation: 1,
+  },
+  addItemRowDesc: { flex: 1, fontSize: 13, fontWeight: '600', color: colors.textPrimary },
+  addItemRowRight: { alignItems: 'flex-end', gap: 2, flexShrink: 0 },
+  addItemRowUnit: { fontSize: 10, fontWeight: '700', color: colors.textMuted },
+  addItemRowPrice: { fontSize: 13, fontWeight: '700', color: colors.primary },
+
+  customItemBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 14, marginTop: 6,
+    borderWidth: 1, borderColor: colors.primary, borderStyle: 'dashed', borderRadius: 10,
+  },
+  customItemBtnText: { fontSize: 14, fontWeight: '700', color: colors.primary },
+
+  customItemForm: { padding: 20, gap: 4 },
+  customItemLabel: {
+    fontSize: 11, fontWeight: '700', color: '#9ca3af',
+    letterSpacing: 0.8, marginBottom: 6, marginTop: 16,
+  },
+  customItemInput: {
+    backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#e5e7eb',
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 15, color: colors.textPrimary,
+  },
+  customItemRow: { flexDirection: 'row', gap: 10 },
+  customItemSaveBtn: {
+    backgroundColor: colors.primary, borderRadius: 10, paddingVertical: 14,
+    alignItems: 'center', marginTop: 24,
+  },
+  customItemSaveBtnText: { fontSize: 15, fontWeight: '700', color: '#fff' },
+  customItemBackBtn: { alignItems: 'center', marginTop: 16, padding: 6 },
+  customItemBackBtnText: { fontSize: 13, color: colors.textMuted, fontWeight: '500' },
 
 });
