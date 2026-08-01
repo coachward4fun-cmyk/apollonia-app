@@ -59,58 +59,30 @@ function extractPhotoMeta(photoUrl) {
   }
 }
 
-// ── Photo pages HTML ───────────────────────────────────────────────────────────
+// ── Photo grid HTML ───────────────────────────────────────────────────────────
+// Renders a batch of already-downloaded photos as a 2-column grid of table
+// rows. Images are scaled via width:100%/height:auto (aspect-ratio preserved)
+// and capped with max-height so a portrait photo can't blow out the row
+// height budget used by the page-fit estimate in buildInvoiceHTML.
 
-function buildPhotoPages(photoData, job = {}) {
-  if (!photoData || photoData.length === 0) return '';
-
-  // Heading on the first photo page identifies which job these photos belong to.
-  const headingParts = [];
-  if (job.jobId)       headingParts.push(`Job ${escapeHtml(job.jobId)}`);
-  if (job.targetDate)  headingParts.push(escapeHtml(formatDate(job.targetDate)));
-  if (job.projectName) headingParts.push(escapeHtml(job.projectName));
-  const heading = headingParts.length
-    ? `Job Site Photos for ${headingParts.join(' · ')}`
-    : 'Job Site Photos';
-
-  const PHOTOS_PER_PAGE = 8;
-  let html = '';
-
-  for (let start = 0; start < photoData.length; start += PHOTOS_PER_PAGE) {
-    const group = photoData.slice(start, start + PHOTOS_PER_PAGE);
-    const isFirst = start === 0;
-
-    const rows = [];
-    for (let r = 0; r < 4; r++) {
-      const p1 = group[r * 2];
-      const p2 = group[r * 2 + 1];
-
-      const cell = (p) => {
-        if (!p) {
-          return '<td style="width:50%;padding:8px;box-sizing:border-box;"></td>';
-        }
-        const caption = p.filename + (p.dateStr ? ' · ' + p.dateStr : '');
-        return `
-          <td style="width:50%;padding:8px;box-sizing:border-box;vertical-align:top;">
-            <img src="data:image/jpeg;base64,${p.base64}"
-                 style="width:100%;height:190px;object-fit:cover;display:block;border-radius:4px;" />
-            <div style="font-size:9px;color:#9ca3af;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${escapeHtml(caption)}</div>
-          </td>`;
-      };
-
-      rows.push(`<tr>${cell(p1)}${cell(p2)}</tr>`);
-    }
-
-    html += `
-      <div style="page-break-before:always;break-before:page;">
-        ${isFirst
-          ? `<div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid #e5e7eb;letter-spacing:0.3px;">${heading}</div>`
-          : ''}
-        <table style="width:100%;table-layout:fixed;border-collapse:collapse;">${rows.join('')}</table>
-      </div>`;
+function buildPhotoRowsHtml(photos) {
+  const rows = [];
+  for (let r = 0; r < photos.length; r += 2) {
+    const p1 = photos[r];
+    const p2 = photos[r + 1];
+    const cell = (p) => {
+      if (!p) return '<td style="width:50%;padding:8px;box-sizing:border-box;"></td>';
+      const caption = p.filename + (p.dateStr ? ' · ' + p.dateStr : '');
+      return `
+        <td style="width:50%;padding:8px;box-sizing:border-box;vertical-align:top;text-align:center;">
+          <img src="data:image/jpeg;base64,${p.base64}"
+               style="width:100%;height:auto;max-height:200px;object-fit:contain;display:block;margin:0 auto;" />
+          <div style="font-size:9px;color:#9ca3af;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${escapeHtml(caption)}</div>
+        </td>`;
+    };
+    rows.push(`<tr>${cell(p1)}${cell(p2)}</tr>`);
   }
-
-  return html;
+  return `<table style="width:100%;table-layout:fixed;border-collapse:collapse;">${rows.join('')}</table>`;
 }
 
 // ── Invoice HTML ───────────────────────────────────────────────────────────────
@@ -119,17 +91,34 @@ function buildPhotoPages(photoData, job = {}) {
 // PDFs use a data: URI so the image embeds offline; email HTML uses the public
 // URL so Gmail / iCloud Mail render it (those clients strip data: image src).
 // Item rows per invoice PDF page. Conservative on purpose — each page div is
-// printed via forced `page-break-before` (same pattern buildPhotoPages already
-// uses), so pagination is computed here in JS rather than relying on the
-// WebKit print engine's auto-pagination, which doesn't support CSS running
-// headers/counter(pages) needed for "Page X of Y" and repeated headers.
+// printed via forced `page-break-before`, so pagination is computed here in
+// JS rather than relying on the WebKit print engine's auto-pagination, which
+// doesn't support CSS running headers/counter(pages) needed for "Page X of Y"
+// and repeated headers.
 const ITEMS_PER_PDF_PAGE = 14;
+
+// Same reasoning applies to the job-photos section appended after the totals
+// block: no real layout measurement is available before printing, so page
+// capacity is a conservative estimate from known component heights rather
+// than a true DOM measurement.
+const PAGE_USABLE_HEIGHT_PX    = 900; // Letter minus 0.5in margins, safety-trimmed
+const PDF_HEADER_HEIGHT_PX     = 90;
+const PDF_FOOTER_HEIGHT_PX     = 40;
+const BILLTO_PROJECT_HEIGHT_PX = 210; // only present on the invoice's first page
+const COLUMN_HEADER_HEIGHT_PX  = 34;
+const ITEM_ROW_HEIGHT_PX       = 24;
+const TOTALS_BLOCK_HEIGHT_PX   = 170;
+const PHOTO_SECTION_TITLE_PX   = 30;
+const PHOTO_ROW_HEIGHT_PX      = 232; // 200px image + caption + padding
+const PHOTOS_PER_FULL_PAGE     = 6;   // 3 rows × 2 columns
+
+const PHOTO_SECTION_TITLE_HTML = `<div style="font-size:9pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin:20px 0 10px;padding-top:12px;border-top:2px solid #e5e7eb;">Job Photos</div>`;
 
 function isBidUnpriced(item) {
   return !!item.isBid && !(Number(item.unitPrice) || 0);
 }
 
-function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote = '', logoSrc = '', extraPages = '', profile = {}) {
+function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote = '', logoSrc = '', photoData = [], profile = {}) {
   const taxRateNum = job.taxRate != null ? job.taxRate : 0;
   const taxLabel   = job.taxLabel || '';
   const taxDisplay = `${taxRateNum}%${taxLabel ? ` - ${taxLabel}` : ''}`;
@@ -148,6 +137,35 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   }
   if (pages.length === 0) pages.push([]);
   const totalPages = pages.length;
+
+  // ── Job photos: fit as many as reasonably possible after totals on the
+  // last invoice page, then continue on dedicated photo pages ──
+  const itemsOnLastPage    = pages[pages.length - 1].length;
+  const isSingleInvoicePage = totalPages === 1;
+  let photosOnLastPage = [];
+  let remainingPhotos  = (photoData || []).slice();
+
+  if (remainingPhotos.length > 0) {
+    const overheadPx = PDF_HEADER_HEIGHT_PX + PDF_FOOTER_HEIGHT_PX
+      + (isSingleInvoicePage ? BILLTO_PROJECT_HEIGHT_PX : 0)
+      + COLUMN_HEADER_HEIGHT_PX
+      + itemsOnLastPage * ITEM_ROW_HEIGHT_PX
+      + TOTALS_BLOCK_HEIGHT_PX
+      + PHOTO_SECTION_TITLE_PX;
+    const leftoverPx  = PAGE_USABLE_HEIGHT_PX - overheadPx;
+    const rowsThatFit = Math.max(0, Math.floor(leftoverPx / PHOTO_ROW_HEIGHT_PX));
+    const countThatFit = rowsThatFit * 2;
+    if (countThatFit > 0) {
+      photosOnLastPage = remainingPhotos.slice(0, countThatFit);
+      remainingPhotos  = remainingPhotos.slice(countThatFit);
+    }
+  }
+
+  const photoPageChunks = [];
+  for (let start = 0; start < remainingPhotos.length; start += PHOTOS_PER_FULL_PAGE) {
+    photoPageChunks.push(remainingPhotos.slice(start, start + PHOTOS_PER_FULL_PAGE));
+  }
+  const totalDocPages = totalPages + photoPageChunks.length;
 
   const headerHtml = `
     <div style="background:#fff;height:60px;">
@@ -277,9 +295,10 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
       ${taxRateNum === 0 ? `<div style="margin-top:14px;font-style:italic;font-size:9pt;color:#6b7280;">* This invoice reflects non-retail services in support of Real Property improvement</div>` : ''}
       ${footerNote ? `<div style="margin-top:16px;">${footerNote}</div>` : ''}`;
 
-  const pageHtml = pages.map((items, i) => {
-    const isFirst = i === 0;
-    const isLast  = i === totalPages - 1;
+  const invoicePagesHtml = pages.map((items, i) => {
+    const isFirst        = i === 0;
+    const isLastItemPage = i === totalPages - 1;
+    const showPhotosHere = isLastItemPage && photosOnLastPage.length > 0;
     return `
   <div style="max-width:680px;margin:0 auto;background:#fff;${isFirst ? '' : 'page-break-before:always;break-before:page;'}">
     ${headerHtml}
@@ -289,8 +308,23 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
         ${columnHeaderHtml}
         <tbody>${items.map(rowHtml).join('')}</tbody>
       </table>
-      ${isLast ? totalsHtml : `<div style="text-align:center;font-size:9pt;font-style:italic;color:#9ca3af;margin:8px 0 16px;">Continued on next page&hellip;</div>`}
-      <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${i + 1} of ${totalPages}</div>
+      ${isLastItemPage ? totalsHtml : `<div style="text-align:center;font-size:9pt;font-style:italic;color:#9ca3af;margin:8px 0 16px;">Continued on next page&hellip;</div>`}
+      ${showPhotosHere ? PHOTO_SECTION_TITLE_HTML + buildPhotoRowsHtml(photosOnLastPage) : ''}
+      <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${i + 1} of ${totalDocPages}</div>
+    </div>
+  </div>`;
+  }).join('');
+
+  const photoPagesHtml = photoPageChunks.map((photos, idx) => {
+    const pageNum   = totalPages + idx + 1;
+    const showTitle = idx === 0 && photosOnLastPage.length === 0;
+    return `
+  <div style="max-width:680px;margin:0 auto;background:#fff;page-break-before:always;break-before:page;">
+    ${headerHtml}
+    <div style="padding:8px 32px;">
+      ${showTitle ? PHOTO_SECTION_TITLE_HTML : ''}
+      ${buildPhotoRowsHtml(photos)}
+      <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${pageNum} of ${totalDocPages}</div>
     </div>
   </div>`;
   }).join('');
@@ -308,9 +342,9 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
 </head>
 <body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
 
-  ${pageHtml}
+  ${invoicePagesHtml}
 
-  ${extraPages}
+  ${photoPagesHtml}
 
 </body>
 </html>`;
@@ -400,7 +434,11 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
 
   // ── Download and compress photos in parallel ──
   // All uploaded photos (up to MAX_EMBEDDED_PHOTOS) are embedded directly.
-  const allPhotoUrls = (job.photos || []).filter(Boolean);
+  // job.photos entries are either bare URL strings (legacy) or { uri } / { url }
+  // objects (current save shape — see JobFormScreen) — normalize both.
+  const allPhotoUrls = (job.photos || [])
+    .map((p) => (typeof p === 'string' ? p : (p?.uri || p?.url || '')))
+    .filter(Boolean);
   const embedUrls    = allPhotoUrls.slice(0, MAX_EMBEDDED_PHOTOS);
 
   const totalToEmbed = embedUrls.length;
@@ -428,8 +466,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
   let pdfUri    = null;
   let pdfStorageUrl = null;
   try {
-    const photoPages = buildPhotoPages(photoData, job);
-    const pdfHtml    = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', pdfLogoSrc, photoPages, profile);
+    const pdfHtml = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', pdfLogoSrc, photoData, profile);
     const { uri }    = await Print.printToFileAsync({ html: pdfHtml, base64: false });
     pdfUri    = uri;
     pdfBase64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
@@ -453,7 +490,7 @@ export async function sendInvoiceEmail(job, invoiceNumber, invDate, dueDate, lin
   const footerNote = n > 0
     ? `<p style="font-size:13px;color:#6b7280;margin-top:16px;">${n} job site photo${n !== 1 ? 's' : ''} included on page${n > 8 ? 's' : ''} 2+ of the attached PDF.</p>`
     : '';
-  const emailHtml = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote, emailLogoSrc, '', profile);
+  const emailHtml = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote, emailLogoSrc, [], profile);
 
   const companyShort = profile.companyName || 'Invoice';
   const subject      = `${companyShort} Invoice - ${job.projectName || invoiceNumber}`;
