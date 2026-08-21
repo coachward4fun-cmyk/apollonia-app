@@ -27,6 +27,8 @@ const clean = (str) => {
   return out;
 };
 
+const NUMERIC_KEYBOARD_TYPES = ['numeric', 'decimal-pad', 'number-pad', 'phone-pad'];
+
 export function AppTextInput({ onChangeText, value, ...props }) {
   const lastValueRef = useRef(value || '');
 
@@ -40,7 +42,12 @@ export function AppTextInput({ onChangeText, value, ...props }) {
   const handleChange = (text) => {
     const prev = lastValueRef.current;
 
-    if (prev.length > 0) {
+    // Dictation doesn't run on numeric keyboards, so the doubling guard is both
+    // unnecessary there and actively harmful — it misfires on repeated-digit input
+    // like "1" -> "11" or "22" -> "2222".
+    const isNumericKeyboard = NUMERIC_KEYBOARD_TYPES.includes(props.keyboardType);
+
+    if (!isNumericKeyboard && prev.length > 0) {
       const cleanText = clean(text);
       const cleanPrev = clean(prev);
       if (cleanPrev.length > 0 && cleanText === cleanPrev + cleanPrev) {

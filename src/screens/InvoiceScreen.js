@@ -5,6 +5,8 @@ import {
 import AppTextInput from '../components/AppTextInput';
 import DatePickerField from '../components/DatePickerField';
 import { sendInvoiceEmail } from '../utils/sendInvoiceEmail';
+import { httpsCallable } from 'firebase/functions';
+import { functions } from '../config/firebase';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { saveJob, getExpenses, getJobTypes, subscribeCompanyProfile, getNextInvoiceNumber } from '../services/db';
@@ -49,6 +51,7 @@ export default function InvoiceScreen() {
   const [statusFilter,   setStatusFilter]  = useState(null);
   const [invMode,        setInvMode]       = useState('all');
   const [invPage,        setInvPage]       = useState(1);
+  const [sendingQueue,   setSendingQueue]  = useState(false);
 
   useEffect(() => {
     const unsubProfile = subscribeCompanyProfile(setCompanyProfile);
@@ -171,6 +174,45 @@ export default function InvoiceScreen() {
     );
   }, []);
 
+  // "Send All Queued" — emails every Invoice Ready job right now via the
+  // sendQueuedInvoices Cloud Function (shares its batch logic with the
+  // Friday auto-send scheduled function). Long timeout because the callable
+  // renders a PDF and sends an email per job server-side before resolving.
+  const handleSendAllQueued = useCallback(() => {
+    const n = jobs.filter((j) => (j.status || '').toLowerCase() === 'invoice ready').length;
+    if (n === 0) {
+      Alert.alert('No Invoices Queued', 'There are no Invoice Ready invoices to send.');
+      return;
+    }
+    Alert.alert(
+      'Send All Queued Invoices',
+      `Send all Invoice Ready invoices now? This will email ${n} invoice${n === 1 ? '' : 's'} immediately.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send Now',
+          onPress: async () => {
+            setSendingQueue(true);
+            try {
+              const result = await httpsCallable(functions, 'sendQueuedInvoices', { timeout: 540000 })();
+              const { sent = 0, failed = 0 } = result.data || {};
+              setSendingQueue(false);
+              Alert.alert(
+                'Invoices Sent',
+                failed === 0
+                  ? `${sent} invoice${sent === 1 ? '' : 's'} sent successfully.`
+                  : `${sent} sent, ${failed} failed. Check the activity log for details.`,
+              );
+            } catch (err) {
+              setSendingQueue(false);
+              Alert.alert('Error', err.message || 'Could not send queued invoices.');
+            }
+          },
+        },
+      ],
+    );
+  }, [jobs]);
+
   const handlePickerSelect = (job) => {
     setShowJobPicker(false);
     setSelectedJobId(job.id);
@@ -192,9 +234,26 @@ export default function InvoiceScreen() {
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Invoices</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={() => setShowJobPicker(true)}>
-          <Ionicons name="add" size={22} color="#fff" />
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            style={styles.sendAllQueuedBtn}
+            onPress={handleSendAllQueued}
+            disabled={sendingQueue}
+            activeOpacity={0.85}
+          >
+            {sendingQueue ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <>
+                <Ionicons name="paper-plane" size={13} color="#fff" />
+                <Text style={styles.sendAllQueuedBtnText}>Send All Queued</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addBtn} onPress={() => setShowJobPicker(true)}>
+            <Ionicons name="add" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.invModeToggle}>
@@ -1560,6 +1619,19 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e5e7eb',
   },
   headerTitle: { fontSize: 22, fontWeight: '800', color: colors.textPrimary },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sendAllQueuedBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 17,
+    backgroundColor: '#2563eb',
+    minWidth: 34,
+    justifyContent: 'center',
+  },
+  sendAllQueuedBtnText: { fontSize: 12, fontWeight: '700', color: '#fff' },
   addBtn: {
     backgroundColor: '#16a34a',
     width: 34,
