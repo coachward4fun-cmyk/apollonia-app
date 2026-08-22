@@ -1,6 +1,14 @@
-import { getJobs, getExpenses, saveJob, saveExpense } from './db';
+import { getJobs, getJob, getExpenses, saveJob, saveExpense } from './db';
 import { ANTHROPIC_API_KEY, CLAUDE_MODEL } from '../config/anthropic';
 import { logActivity } from './activityLog';
+
+// Mirrors STATUSES in src/screens/JobFormScreen.js — kept as a local copy
+// rather than a shared import since this is a plain service module, not a
+// screen; both lists need to stay in sync if the status lifecycle changes.
+const STATUSES = [
+  'Not Scheduled', 'Scheduled', 'In Progress',
+  'Invoice Ready', 'Invoice Sent', 'Invoice Paid', 'Cancelled',
+];
 
 const SYSTEM_PROMPT = `You are the Apollonia Assistant, an AI helper for Apollonia Construction LLC.
 You help manage business operations: jobs, crews, invoices, and expenses.
@@ -319,6 +327,23 @@ export async function executeAction(action) {
           throw new Error('Cannot set status to Scheduled — this job has no target date. Set a target date first.');
         }
       }
+
+      // Guard against reverting an already-invoiced job backward — reads the
+      // live Firestore doc (not a locally-cached list) since this action can
+      // fire well after any job list was last loaded. Mirrors the guard in
+      // JobFormScreen.js's handleSave.
+      const currentJob  = await getJob(action.data.jobId);
+      const liveStatus  = currentJob?.status || '';
+      const liveIdx     = STATUSES.indexOf(liveStatus);
+      const targetIdx   = STATUSES.indexOf(action.data.newStatus);
+      const isBackwardFromInvoiced =
+        (liveStatus === 'Invoice Sent' || liveStatus === 'Invoice Paid')
+        && liveIdx !== -1 && targetIdx !== -1 && targetIdx < liveIdx;
+
+      if (isBackwardFromInvoiced) {
+        return `This job has already been invoiced and cannot be moved back to ${action.data.newStatus}.`;
+      }
+
       await saveJob({ id: action.data.jobId, status: action.data.newStatus });
       logActivity('ai_update_job', `AI updated job ${action.data.jobId} status → ${action.data.newStatus}`);
       return `Job status updated to ${action.data.newStatus}.`;

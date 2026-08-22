@@ -546,6 +546,39 @@ export default function JobFormScreen() {
         return;
       }
     }
+
+    // Guard against reverting a job's status backward after it's already been
+    // invoiced/paid — the live Firestore value can be ahead of this form's
+    // local `status` state if it was advanced elsewhere (a batch send, Mark
+    // Paid) while this screen was open. Unlike the invoice wizard's silent
+    // preserve, this is a deliberate status-field edit, so confirm rather
+    // than silently drop it.
+    const liveStatus = contextActiveJobs.find((j) => j.id === jobInstanceId.current)?.status || '';
+    const effectiveStatusForCheck = (!isEdit && targetDate.trim() && (!status || status === 'Not Scheduled'))
+      ? 'Scheduled'
+      : (status || 'Not Scheduled');
+    const liveIdx   = STATUSES.indexOf(liveStatus);
+    const targetIdx = STATUSES.indexOf(effectiveStatusForCheck);
+    const isBackwardFromInvoiced =
+      (liveStatus === 'Invoice Sent' || liveStatus === 'Invoice Paid')
+      && liveIdx !== -1 && targetIdx !== -1 && targetIdx < liveIdx;
+
+    if (isBackwardFromInvoiced) {
+      Alert.alert(
+        'Status Change',
+        'This job has already been invoiced. Are you sure you want to change the status?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Change Status', style: 'destructive', onPress: () => doSave() },
+        ],
+      );
+      return;
+    }
+
+    doSave();
+  };
+
+  const doSave = async () => {
     setSaving(true);
     try {
       const id = jobInstanceId.current;

@@ -346,6 +346,7 @@ export default function InvoiceScreen() {
         visible={showWizard}
         companyProfile={companyProfile}
         customers={customers}
+        jobs={jobs}
         preselectedJob={selectedJob}
         onClose={() => { setShowWizard(false); setSelectedJobId(null); }}
         onSave={handleSaveInvoice}
@@ -657,7 +658,7 @@ function AddLineItemModal({ visible, existingItems, onAdd, onClose }) {
 
 // ── InvoiceWizard ──────────────────────────────────────────────────────────────
 
-function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob, onClose, onSave, onEditJob }) {
+function InvoiceWizard({ visible, companyProfile, customers = [], jobs = [], preselectedJob, onClose, onSave, onEditJob }) {
   const [step,      setStep]      = useState(2);
   const [selJob,    setSelJob]    = useState(null);
   const [invNumber, setInvNumber] = useState('');
@@ -675,6 +676,24 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
   const [showAddItem,  setShowAddItem]  = useState(false);
   const scrollRef = useRef(null);
   const isPaid = (selJob?.status || '').toLowerCase() === 'invoice paid';
+
+  // Strips `status` from an outgoing saveJob payload when Firestore's live
+  // status for this job is already 'Invoice Sent' or 'Invoice Paid'. The
+  // wizard's local state (selJob) is captured when it opens and doesn't
+  // re-sync while it stays open — if something else (a batch send, Mark
+  // Paid) advances the real status in the meantime, blindly re-saving the
+  // wizard's stale 'Invoice Ready' would silently revert that update.
+  // handleFixInvoice intentionally sets status backward from Paid and is not
+  // routed through this guard.
+  const guardStatus = (payload) => {
+    if (!payload || !('status' in payload) || !payload.id) return payload;
+    const liveStatus = (jobs.find((j) => j.id === payload.id)?.status || '').toLowerCase();
+    if (liveStatus === 'invoice sent' || liveStatus === 'invoice paid') {
+      const { status, ...rest } = payload;
+      return rest;
+    }
+    return payload;
+  };
 
   useEffect(() => {
     if (!visible || !preselectedJob) return;
@@ -800,7 +819,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
         // Back from preview goes to step 3 (line items) so they can still be edited.
         const updatedJob = buildUpdatedJob('Invoice Ready');
         setSelJob(updatedJob);
-        saveJob(updatedJob).catch((err) => {
+        saveJob(guardStatus(updatedJob)).catch((err) => {
           console.warn('[Invoice] interim save failed:', err.message);
           setToast(`Save failed — ${err.message || 'try again on the next step'}`);
           setTimeout(() => setToast(''), 3500);
@@ -813,7 +832,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     if (step === 3 && !isPaid) {
       const updatedJob = buildUpdatedJob('Invoice Ready');
       setSelJob(updatedJob);
-      saveJob(updatedJob).catch((err) => {
+      saveJob(guardStatus(updatedJob)).catch((err) => {
         console.warn('[Invoice] interim save failed:', err.message);
         setToast(`Save failed — ${err.message || 'try again on the next step'}`);
         setTimeout(() => setToast(''), 3500);
@@ -840,7 +859,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
       isBid:       !!i.isBid,
     }));
     try {
-      await saveJob({ ...selJob, lineItems: cleanItems, taxRate: taxRateNum });
+      await saveJob(guardStatus({ ...selJob, lineItems: cleanItems, taxRate: taxRateNum }));
       setToast('Line items saved');
       setTimeout(handleClose, 1200);
     } catch (err) {
@@ -922,7 +941,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
     try {
       const saveDate   = today();
       const updatedJob = { ...buildUpdatedJob('Invoice Ready'), invoiceDate: saveDate, dueDate: addDays(saveDate, 30) };
-      await saveJob(updatedJob);
+      await saveJob(guardStatus(updatedJob));
       logActivity('invoice_created', `Invoice #${invNumber.trim()} for ${selJob.projectName || selJob.billToName || 'job'}`);
       setSaving(false);
       setToast('Invoice saved');
@@ -993,7 +1012,7 @@ function InvoiceWizard({ visible, companyProfile, customers = [], preselectedJob
           ? { invoicePdfUrl: sendResult.pdfUrl, invoicePdfUploadedAt: new Date().toISOString() }
           : {}),
       };
-      await saveJob(sentJob);
+      await saveJob(guardStatus(sentJob));
       logActivity('invoice_sent', `Sent invoice #${invNumber.trim()} — ${selJob.projectName || 'job'}${selJob.billToName ? ` (${selJob.billToName})` : ''} to ${selJob.email}`);
       setSending(false);
       setToast('Invoice sent and job status updated to Invoice Sent');

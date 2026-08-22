@@ -40,6 +40,11 @@ export async function getJobs() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
 
+export async function getJob(id) {
+  const snap = await getDoc(doc(db, 'jobs', id));
+  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+}
+
 export async function saveJob(job) {
   await setDoc(doc(db, 'jobs', job.id), sanitize(job), { merge: true });
 }

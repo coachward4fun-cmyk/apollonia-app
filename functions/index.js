@@ -4,6 +4,7 @@ const admin           = require('firebase-admin');
 const nodemailer      = require('nodemailer');
 const chromium        = require('@sparticuz/chromium').default;
 const puppeteer       = require('puppeteer-core');
+const sharp           = require('sharp');
 const { randomUUID }  = require('crypto');
 
 admin.initializeApp();
@@ -870,15 +871,25 @@ function extractPhotoMeta(photoUrl) {
 // client's sendInvoiceEmail.js.
 const MAX_EMBEDDED_PHOTOS = 25;
 
-// Downloads one job photo and base64-encodes it for inline embedding. Returns
-// null (never throws) so a single bad URL can't take down the whole batch —
-// processInvoiceQueue filters out nulls before handing photoData to
-// buildInvoiceHTML, i.e. failed downloads are skipped silently.
+// Downloads one job photo, downscales it to a max 800px width (matches the
+// spirit of the client's 500px/0.65-quality resize in sendInvoiceEmail.js —
+// full-resolution originals were bloating the PDF payload enough to blow
+// Puppeteer's page-load timeout), and base64-encodes the result for inline
+// embedding. Returns null (never throws) so a single bad URL/unresizable
+// image can't take down the whole batch — processInvoiceQueue filters out
+// nulls before handing photoData to buildInvoiceHTML, i.e. failed downloads
+// are skipped silently.
 async function downloadPhotoAsBase64(photoUrl) {
   try {
-    const { base64, mediaType } = await fetchImageAsBase64(photoUrl);
+    const response = await fetch(photoUrl);
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const resized = await sharp(buffer)
+      .resize({ width: 800, withoutEnlargement: true })
+      .jpeg({ quality: 70 })
+      .toBuffer();
     const { filename, dateStr } = extractPhotoMeta(photoUrl);
-    return { base64, mediaType, filename, dateStr };
+    return { base64: resized.toString('base64'), mediaType: 'image/jpeg', filename, dateStr };
   } catch (err) {
     console.warn('[downloadPhotoAsBase64] skipped', photoUrl, '—', err.message);
     return null;
@@ -1229,7 +1240,11 @@ async function fetchCompanyProfile() {
 async function renderInvoicePdfBuffer(browser, html) {
   const page = await browser.newPage();
   try {
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // domcontentloaded (not networkidle0) — every image in this HTML is an
+    // inline base64 data: URI (photos pre-downloaded, logo excepted), so
+    // there's no network activity to wait out. 120s headroom covers parsing
+    // a large multi-photo payload on the function's 1 CPU.
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 120000 });
     return await page.pdf({ printBackground: true, preferCSSPageSize: true });
   } finally {
     await page.close();
@@ -1280,6 +1295,22 @@ async function processInvoiceQueue(source) {
   const emailConfig = configSnap.data();
   const profile      = await fetchCompanyProfile();
 
+  // Inline the logo as base64 for the PDF (same treatment as job photos) so
+  // Puppeteer's page.pdf() never races a live-network image load — since
+  // Fix 1 switched page.setContent to 'domcontentloaded', it no longer waits
+  // for remote <img> requests to finish before rendering. The email body
+  // keeps using the public URL (Gmail/most clients strip inline data: image
+  // src), matching the client's pdfLogoSrc/emailLogoSrc split.
+  let pdfLogoSrc = '';
+  if (profile.logoUrl) {
+    try {
+      const { base64, mediaType } = await fetchImageAsBase64(profile.logoUrl);
+      pdfLogoSrc = `data:${mediaType};base64,${base64}`;
+    } catch (err) {
+      console.warn('[processInvoiceQueue] logo fetch failed:', err.message);
+    }
+  }
+
   const browser   = await puppeteer.launch({
     args:            chromium.args,
     defaultViewport: chromium.defaultViewport,
@@ -1315,7 +1346,7 @@ async function processInvoiceQueue(source) {
         // PDF embeds the photos directly; the email body never does (Gmail and
         // most other clients strip inline data: image src) — same split as the
         // client's sendInvoiceEmail.js.
-        const pdfHtml   = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', profile.logoUrl || '', photoData, profile);
+        const pdfHtml   = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', pdfLogoSrc, photoData, profile);
         const pdfBuffer = await renderInvoicePdfBuffer(browser, pdfHtml);
 
         const n = photoData.length;
