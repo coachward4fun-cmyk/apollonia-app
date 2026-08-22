@@ -2,7 +2,8 @@ const { onRequest, onCall, HttpsError } = require('firebase-functions/v2/https')
 const { onSchedule }  = require('firebase-functions/v2/scheduler');
 const admin           = require('firebase-admin');
 const nodemailer      = require('nodemailer');
-const puppeteer       = require('puppeteer');
+const chromium        = require('@sparticuz/chromium').default;
+const puppeteer       = require('puppeteer-core');
 const { randomUUID }  = require('crypto');
 
 admin.initializeApp();
@@ -800,10 +801,11 @@ exports.notifyAppUpdate = onCall(
 // compressing job photos — none of which exist in the Cloud Functions Node
 // runtime. To keep the emailed PDF visually identical to a manually-sent one,
 // buildInvoiceHTML below is a straight port of the client's HTML template
-// (src/utils/sendInvoiceEmail.js) with puppeteer standing in for expo-print.
-// One simplification: batch-sent PDFs omit job photos (photoData is always
-// []) to avoid adding a Storage-download/resize step here — line items,
-// totals, and company branding are unaffected.
+// (src/utils/sendInvoiceEmail.js) with puppeteer standing in for expo-print
+// and a plain fetch()-based download standing in for expo-file-system/
+// expo-image-manipulator (no resize/compress step — Cloud Functions has no
+// native image library available without adding one, so photos embed at
+// their original size).
 
 const INTERNAL_CC = 'Apolloniarecords999@gmail.com';
 
@@ -844,7 +846,85 @@ function formatPhoneDisplayFn(phone) {
   return phone;
 }
 
+// Extract filename and upload date from a Firebase Storage download URL —
+// mirrors src/utils/sendInvoiceEmail.js's extractPhotoMeta.
+function extractPhotoMeta(photoUrl) {
+  try {
+    const oIdx = photoUrl.indexOf('/o/');
+    if (oIdx === -1) return { filename: 'photo.jpg', dateStr: '' };
+    const encoded = photoUrl.slice(oIdx + 3).split('?')[0];
+    const decoded = decodeURIComponent(encoded);
+    const filename = decoded.split('/').pop() || 'photo.jpg';
+    const tsStr = filename.split('_')[0];
+    const ts = parseInt(tsStr, 10);
+    const dateStr = ts > 1_000_000_000_000
+      ? new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : '';
+    return { filename, dateStr };
+  } catch {
+    return { filename: 'photo.jpg', dateStr: '' };
+  }
+}
+
+// Max photos embedded per invoice PDF — matches MAX_EMBEDDED_PHOTOS in the
+// client's sendInvoiceEmail.js.
+const MAX_EMBEDDED_PHOTOS = 25;
+
+// Downloads one job photo and base64-encodes it for inline embedding. Returns
+// null (never throws) so a single bad URL can't take down the whole batch —
+// processInvoiceQueue filters out nulls before handing photoData to
+// buildInvoiceHTML, i.e. failed downloads are skipped silently.
+async function downloadPhotoAsBase64(photoUrl) {
+  try {
+    const { base64, mediaType } = await fetchImageAsBase64(photoUrl);
+    const { filename, dateStr } = extractPhotoMeta(photoUrl);
+    return { base64, mediaType, filename, dateStr };
+  } catch (err) {
+    console.warn('[downloadPhotoAsBase64] skipped', photoUrl, '—', err.message);
+    return null;
+  }
+}
+
+// Renders a batch of already-downloaded photos as a 2-column grid of table
+// rows — mirrors src/utils/sendInvoiceEmail.js's buildPhotoRowsHtml.
+function buildPhotoRowsHtml(photos) {
+  const rows = [];
+  for (let r = 0; r < photos.length; r += 2) {
+    const p1 = photos[r];
+    const p2 = photos[r + 1];
+    const cell = (p) => {
+      if (!p) return '<td style="width:50%;padding:8px;box-sizing:border-box;"></td>';
+      const caption = p.filename + (p.dateStr ? ' · ' + p.dateStr : '');
+      return `
+        <td style="width:50%;padding:8px;box-sizing:border-box;vertical-align:top;text-align:center;">
+          <img src="data:${p.mediaType || 'image/jpeg'};base64,${p.base64}"
+               style="width:100%;height:auto;max-height:200px;object-fit:contain;display:block;margin:0 auto;" />
+          <div style="font-size:9px;color:#9ca3af;margin-top:3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${escapeHtmlFn(caption)}</div>
+        </td>`;
+    };
+    rows.push(`<tr>${cell(p1)}${cell(p2)}</tr>`);
+  }
+  return `<table style="width:100%;table-layout:fixed;border-collapse:collapse;">${rows.join('')}</table>`;
+}
+
+const PHOTO_SECTION_TITLE_HTML = `<div style="font-size:9pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:0.8px;margin:20px 0 10px;padding-top:12px;border-top:2px solid #e5e7eb;">Job Photos</div>`;
+
 const ITEMS_PER_PDF_PAGE = 14;
+
+// Page-fit constants for placing the job-photos section after totals —
+// mirror src/utils/sendInvoiceEmail.js's pagination estimate (no real DOM
+// measurement is available before printing, so this is a conservative
+// estimate from known component heights).
+const PAGE_USABLE_HEIGHT_PX    = 900; // Letter minus 0.5in margins, safety-trimmed
+const PDF_HEADER_HEIGHT_PX     = 90;
+const PDF_FOOTER_HEIGHT_PX     = 40;
+const BILLTO_PROJECT_HEIGHT_PX = 210; // only present on the invoice's first page
+const COLUMN_HEADER_HEIGHT_PX  = 34;
+const ITEM_ROW_HEIGHT_PX       = 24;
+const TOTALS_BLOCK_HEIGHT_PX   = 170;
+const PHOTO_SECTION_TITLE_PX   = 30;
+const PHOTO_ROW_HEIGHT_PX      = 232; // 200px image + caption + padding
+const PHOTOS_PER_FULL_PAGE     = 6;   // 3 rows × 2 columns
 
 function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote = '', logoSrc = '', photoData = [], profile = {}) {
   const taxRateNum = job.taxRate != null ? job.taxRate : 0;
@@ -865,7 +945,35 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   }
   if (pages.length === 0) pages.push([]);
   const totalPages = pages.length;
-  const totalDocPages = totalPages; // no photo pages — photoData is always [] here
+
+  // ── Job photos: fit as many as reasonably possible after totals on the
+  // last invoice page, then continue on dedicated photo pages ──
+  const itemsOnLastPage     = pages[pages.length - 1].length;
+  const isSingleInvoicePage = totalPages === 1;
+  let photosOnLastPage = [];
+  let remainingPhotos  = (photoData || []).slice();
+
+  if (remainingPhotos.length > 0) {
+    const overheadPx = PDF_HEADER_HEIGHT_PX + PDF_FOOTER_HEIGHT_PX
+      + (isSingleInvoicePage ? BILLTO_PROJECT_HEIGHT_PX : 0)
+      + COLUMN_HEADER_HEIGHT_PX
+      + itemsOnLastPage * ITEM_ROW_HEIGHT_PX
+      + TOTALS_BLOCK_HEIGHT_PX
+      + PHOTO_SECTION_TITLE_PX;
+    const leftoverPx  = PAGE_USABLE_HEIGHT_PX - overheadPx;
+    const rowsThatFit = Math.max(0, Math.floor(leftoverPx / PHOTO_ROW_HEIGHT_PX));
+    const countThatFit = rowsThatFit * 2;
+    if (countThatFit > 0) {
+      photosOnLastPage = remainingPhotos.slice(0, countThatFit);
+      remainingPhotos  = remainingPhotos.slice(countThatFit);
+    }
+  }
+
+  const photoPageChunks = [];
+  for (let start = 0; start < remainingPhotos.length; start += PHOTOS_PER_FULL_PAGE) {
+    photoPageChunks.push(remainingPhotos.slice(start, start + PHOTOS_PER_FULL_PAGE));
+  }
+  const totalDocPages = totalPages + photoPageChunks.length;
 
   const headerHtml = `
     <div style="background:#fff;height:60px;">
@@ -998,6 +1106,7 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
   const invoicePagesHtml = pages.map((items, i) => {
     const isFirst        = i === 0;
     const isLastItemPage = i === totalPages - 1;
+    const showPhotosHere = isLastItemPage && photosOnLastPage.length > 0;
     return `
   <div style="max-width:680px;margin:0 auto;background:#fff;${isFirst ? '' : 'page-break-before:always;break-before:page;'}">
     ${headerHtml}
@@ -1008,7 +1117,22 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
         <tbody>${items.map(rowHtml).join('')}</tbody>
       </table>
       ${isLastItemPage ? totalsHtml : `<div style="text-align:center;font-size:9pt;font-style:italic;color:#9ca3af;margin:8px 0 16px;">Continued on next page&hellip;</div>`}
+      ${showPhotosHere ? PHOTO_SECTION_TITLE_HTML + buildPhotoRowsHtml(photosOnLastPage) : ''}
       <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${i + 1} of ${totalDocPages}</div>
+    </div>
+  </div>`;
+  }).join('');
+
+  const photoPagesHtml = photoPageChunks.map((photos, idx) => {
+    const pageNum   = totalPages + idx + 1;
+    const showTitle = idx === 0 && photosOnLastPage.length === 0;
+    return `
+  <div style="max-width:680px;margin:0 auto;background:#fff;page-break-before:always;break-before:page;">
+    ${headerHtml}
+    <div style="padding:8px 32px;">
+      ${showTitle ? PHOTO_SECTION_TITLE_HTML : ''}
+      ${buildPhotoRowsHtml(photos)}
+      <div style="text-align:center;font-size:9pt;color:#9ca3af;border-top:1px solid #f3f4f6;padding-top:8px;margin-top:16px;">Page ${pageNum} of ${totalDocPages}</div>
     </div>
   </div>`;
   }).join('');
@@ -1027,6 +1151,8 @@ function buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, foote
 <body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
 
   ${invoicePagesHtml}
+
+  ${photoPagesHtml}
 
 </body>
 </html>`;
@@ -1154,7 +1280,12 @@ async function processInvoiceQueue(source) {
   const emailConfig = configSnap.data();
   const profile      = await fetchCompanyProfile();
 
-  const browser   = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser   = await puppeteer.launch({
+    args:            chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath:  await chromium.executablePath(),
+    headless:        chromium.headless,
+  });
   const sentJobs   = [];
   const failedJobs = [];
 
@@ -1171,16 +1302,35 @@ async function processInvoiceQueue(source) {
         const dueDate       = job.dueDate || '';
         const lineItems     = job.lineItems || [];
 
-        const html      = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', profile.logoUrl || '', [], profile);
-        const pdfBuffer  = await renderInvoicePdfBuffer(browser, html);
-        const plainText  = buildInvoicePlainText(job, invoiceNumber, invDate, dueDate, lineItems, profile);
-        const subject    = `${profile.companyName || 'Invoice'} Invoice - ${projectName || invoiceNumber}`;
+        // job.photos entries are either bare URL strings (legacy) or
+        // { uri } / { url } objects (current save shape — see JobFormScreen).
+        const embedUrls = (job.photos || [])
+          .map((p) => (typeof p === 'string' ? p : (p?.uri || p?.url || '')))
+          .filter(Boolean)
+          .slice(0, MAX_EMBEDDED_PHOTOS);
+        const photoData = (
+          await Promise.all(embedUrls.map((url) => downloadPhotoAsBase64(url)))
+        ).filter(Boolean);
+
+        // PDF embeds the photos directly; the email body never does (Gmail and
+        // most other clients strip inline data: image src) — same split as the
+        // client's sendInvoiceEmail.js.
+        const pdfHtml   = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, '', profile.logoUrl || '', photoData, profile);
+        const pdfBuffer = await renderInvoicePdfBuffer(browser, pdfHtml);
+
+        const n = photoData.length;
+        const footerNote = n > 0
+          ? `<p style="font-size:13px;color:#6b7280;margin-top:16px;">${n} job site photo${n !== 1 ? 's' : ''} included in the attached PDF.</p>`
+          : '';
+        const emailHtml = buildInvoiceHTML(job, invoiceNumber, invDate, dueDate, lineItems, footerNote, profile.logoUrl || '', [], profile);
+        const plainText = buildInvoicePlainText(job, invoiceNumber, invDate, dueDate, lineItems, profile);
+        const subject   = `${profile.companyName || 'Invoice'} Invoice - ${projectName || invoiceNumber}`;
 
         await sendEmailCore(emailConfig, {
           to:        job.email,
           cc:        [INTERNAL_CC],
           subject,
-          htmlBody:  html,
+          htmlBody:  emailHtml,
           text:      plainText,
           pdfBuffer,
           fileName:  `Invoice-${invoiceNumber}.pdf`,
