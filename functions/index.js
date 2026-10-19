@@ -212,6 +212,54 @@ exports.morningCrewCheck = onSchedule(
   },
 );
 
+// ── A2) morningReminderCheck — 9 AM Central daily ────────────────────────────
+// Personal reminders: each notifiable user with open reminders due today or
+// overdue gets their own push. Users with nothing due get nothing.
+
+exports.morningReminderCheck = onSchedule(
+  { schedule: '0 9 * * *', timeZone: 'America/Chicago', timeoutSeconds: 60, memory: '128MiB' },
+  async () => {
+    const todayStr = getCentralDateStr(0);
+    console.log('[morningReminderCheck] Today (CT):', todayStr);
+
+    const remSnap = await db.collection('reminders').where('done', '==', false).get();
+    const dueByUser = {};
+    for (const d of remSnap.docs) {
+      const r = d.data();
+      if (!r.userId || !r.dueDate || r.dueDate > todayStr) continue;
+      (dueByUser[r.userId] = dueByUser[r.userId] || []).push({ id: d.id, ...r });
+    }
+
+    const userIds = Object.keys(dueByUser);
+    if (userIds.length === 0) {
+      console.log('[morningReminderCheck] No due or overdue reminders.');
+      return;
+    }
+
+    const users = (await getNotifiableUsers()).filter((u) => dueByUser[u.id]);
+    if (users.length === 0) {
+      console.log('[morningReminderCheck] No notifiable users with due reminders.');
+      return;
+    }
+
+    const messages = users.map((u) => {
+      // Oldest due date first so the most overdue item leads the body.
+      const due = dueByUser[u.id].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+      const n   = due.length;
+      return {
+        to:    u.pushToken,
+        title: '📋 Reminders Due',
+        body:  `You have ${n} reminder${n === 1 ? '' : 's'} due today: ${due[0].text}${n > 1 ? '...' : ''}`,
+        data:  { type: 'reminders_due', count: n, reminderIds: due.map((r) => r.id) },
+        badge: n,
+      };
+    });
+
+    await sendExpoPush(messages);
+    console.log(`[morningReminderCheck] Sent ${messages.length} personal reminder push(es).`);
+  },
+);
+
 // ── B) dayBeforeReminder — 5 PM Central daily ─────────────────────────────────
 // For each assigned crew with jobs tomorrow, alerts every notifiable user so any
 // of them can tap to send the WhatsApp Notify Crew message.

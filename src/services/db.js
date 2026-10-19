@@ -448,3 +448,57 @@ export async function clearActivityLog(cutoffDate = null) {
   }
   return docs.length;
 }
+
+// ── Reminders (reminders/{id}) ───────────────────────────────────────────────
+// Personal to-do list, scoped per user by auth UID. Sorted client-side by
+// createdAt desc so the where('userId') query doesn't need a composite index.
+
+function sortRemindersNewestFirst(list) {
+  return list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+}
+
+export function subscribeReminders(userId, callback) {
+  if (!userId) { callback([]); return () => {}; }
+  return onSnapshot(query(collection(db, 'reminders'), where('userId', '==', userId)), (snap) => {
+    callback(sortRemindersNewestFirst(snap.docs.map((d) => ({ id: d.id, ...d.data() }))));
+  }, (err) => {
+    console.error('[db] reminders subscription error:', err.code, err.message);
+    callback([]);
+  });
+}
+
+export async function getReminders(userId) {
+  if (!userId) return [];
+  const snap = await getDocs(query(collection(db, 'reminders'), where('userId', '==', userId)));
+  return sortRemindersNewestFirst(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+}
+
+// Creates when reminder.id is missing, otherwise merges into the existing doc.
+export async function saveReminder(reminder) {
+  const now = new Date().toISOString();
+  const id  = reminder.id || `rem_${generateId()}`;
+  const data = { ...reminder, id, updatedAt: now };
+  if (!reminder.id) {
+    data.createdAt = now;
+    data.done      = reminder.done === true;
+  }
+  if (data.dueDate === '') data.dueDate = null;
+  await setDoc(doc(db, 'reminders', id), sanitize(data), { merge: true });
+  return id;
+}
+
+export async function deleteReminder(id) {
+  await deleteDoc(doc(db, 'reminders', id));
+}
+
+export async function toggleReminderDone(id, done) {
+  await setDoc(doc(db, 'reminders', id), { done: !!done, updatedAt: new Date().toISOString() }, { merge: true });
+}
+
+export async function deleteReminders(ids) {
+  for (let i = 0; i < ids.length; i += 450) {
+    const batch = writeBatch(db);
+    ids.slice(i, i + 450).forEach((id) => batch.delete(doc(db, 'reminders', id)));
+    await batch.commit();
+  }
+}

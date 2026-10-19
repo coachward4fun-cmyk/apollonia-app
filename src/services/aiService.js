@@ -1,4 +1,7 @@
-import { getJobs, getJob, getExpenses, saveJob, saveExpense } from './db';
+import {
+  getJobs, getJob, getExpenses, saveJob, saveExpense,
+  getReminders, saveReminder, deleteReminder, toggleReminderDone,
+} from './db';
 import { ANTHROPIC_API_KEY, CLAUDE_MODEL } from '../config/anthropic';
 import { logActivity } from './activityLog';
 
@@ -12,6 +15,7 @@ const STATUSES = [
 
 const SYSTEM_PROMPT = `You are the Apollonia Assistant, an AI helper for Apollonia Construction LLC.
 You help manage business operations: jobs, crews, invoices, and expenses.
+You can manage the user's personal reminder list. Commands: add a reminder, mark reminder done, delete a reminder, list my reminders.
 
 CRITICAL: Always respond with raw JSON only. No markdown, no code blocks, no prose outside JSON.
 
@@ -27,6 +31,10 @@ Action types and their data fields:
 - MARK_CREW_PAID: { jobId }
 - CREATE_EXPENSE: { description, amount, date (YYYY-MM-DD), category }
 - START_VOICE_FLOW: { flowType: "new_job" | "new_customer" | "edit_job", jobId: null }
+- ADD_REMINDER: { text, dueDate (YYYY-MM-DD, optional) }
+- COMPLETE_REMINDER: { reminderId, text } — reminderId from the reminders list in context; text as a fallback match
+- DELETE_REMINDER: { reminderId, text } — same matching as COMPLETE_REMINDER
+- LIST_REMINDERS: {} — read-only, runs immediately without confirmation
 
 Rules:
 - Keep "message" brief — it will be spoken aloud
@@ -35,6 +43,8 @@ Rules:
 - When user asks to "create a job", "new job", "add a job" → use START_VOICE_FLOW with flowType "new_job"; message should say "I'll guide you through creating a new job step by step."
 - When user asks to "create a customer", "new customer", "add a customer" → use START_VOICE_FLOW with flowType "new_customer"
 - When user asks to "edit a job" or "change a job" without specifying fields → use START_VOICE_FLOW with flowType "edit_job"
+- When user asks to "list my reminders" or "what are my reminders" → answer directly in "message" from the reminders in context (pendingAction null), or use LIST_REMINDERS
+- For reminders, interpret relative due dates ("tomorrow", "Friday") using today's date; omit dueDate if none is mentioned
 - If the user is on the Admin screen (isAdminScreen: true in context), set pendingAction to null and say "Sorry, I am restricted from making changes on the Admin screen."
 - Respond in English only
 - Reference specific job titles, customer names, and crew names from the provided data
@@ -180,10 +190,13 @@ export async function extractJobFromImage({ base64, mediaType = 'image/jpeg' }) 
 
 // jobs and crews flow in from AppDataContext (already-live subscriptions in the
 // caller). Only expenses are fetched here, since they aren't in context yet.
-export async function sendAIMessage(conversationHistory, isAdminScreen, userName, { jobs = [], crews = [] } = {}) {
+export async function sendAIMessage(conversationHistory, isAdminScreen, userName, { jobs = [], crews = [], userId = null } = {}) {
   const allJobs    = jobs;
   const allCrews   = crews;
-  const allExpenses = await getExpenses();
+  const [allExpenses, allReminders] = await Promise.all([
+    getExpenses(),
+    getReminders(userId).catch(() => []),
+  ]);
 
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -250,6 +263,10 @@ export async function sendAIMessage(conversationHistory, isAdminScreen, userName
       byCategory: expByCategory,
       recent: recentExpenses.slice(0, 5).map((e) => ({ id: e.id, description: e.description, amount: e.amount, date: e.date })),
     },
+    reminders: allReminders
+      .filter((r) => !r.done)
+      .slice(0, 30)
+      .map((r) => ({ id: r.id, text: r.text, dueDate: r.dueDate || null })),
   });
 
   const system = `${SYSTEM_PROMPT}\n\nCurrent app data:\n${contextBlock}`;
@@ -296,7 +313,31 @@ export async function sendAIMessage(conversationHistory, isAdminScreen, userName
   };
 }
 
-export async function executeAction(action) {
+// Resolves a reminder from AI action data — exact id first, then a
+// case-insensitive text match (exact, then substring) against the user's list.
+async function findReminder(userId, { reminderId, text } = {}, { openOnly = false } = {}) {
+  const all  = await getReminders(userId);
+  const pool = openOnly ? all.filter((r) => !r.done) : all;
+  if (reminderId) {
+    const byId = all.find((r) => r.id === reminderId);
+    if (byId) return byId;
+  }
+  const needle = (text || '').trim().toLowerCase();
+  if (!needle) return null;
+  return pool.find((r) => (r.text || '').toLowerCase() === needle)
+    || pool.find((r) => (r.text || '').toLowerCase().includes(needle))
+    || pool.find((r) => needle.includes((r.text || '').toLowerCase()))
+    || null;
+}
+
+function formatReminderList(reminders) {
+  const open = reminders.filter((r) => !r.done);
+  if (open.length === 0) return 'You have no open reminders.';
+  const lines = open.map((r, i) => `${i + 1}. ${r.text}${r.dueDate ? ` (due ${r.dueDate})` : ''}`);
+  return `You have ${open.length} open reminder${open.length === 1 ? '' : 's'}:\n${lines.join('\n')}`;
+}
+
+export async function executeAction(action, { userId = null } = {}) {
   switch (action.type) {
     case 'CREATE_JOB': {
       // Business rule: a job cannot have status "Scheduled" without a target date.
@@ -360,6 +401,28 @@ export async function executeAction(action) {
       await saveExpense(expense);
       logActivity('ai_create_expense', `AI created expense: ${action.data.description} $${action.data.amount}`);
       return `Expense created: ${action.data.description}.`;
+    }
+    case 'ADD_REMINDER': {
+      if (!userId) throw new Error('You must be signed in to add reminders.');
+      const text = (action.data?.text || '').trim();
+      if (!text) throw new Error('Reminder text is required.');
+      await saveReminder({ userId, text, dueDate: action.data.dueDate || null, done: false });
+      return `Reminder added: ${text}${action.data.dueDate ? `, due ${action.data.dueDate}` : ''}.`;
+    }
+    case 'COMPLETE_REMINDER': {
+      const reminder = await findReminder(userId, action.data, { openOnly: true });
+      if (!reminder) return "I couldn't find that reminder.";
+      await toggleReminderDone(reminder.id, true);
+      return `Marked done: ${reminder.text}.`;
+    }
+    case 'DELETE_REMINDER': {
+      const reminder = await findReminder(userId, action.data);
+      if (!reminder) return "I couldn't find that reminder.";
+      await deleteReminder(reminder.id);
+      return `Deleted reminder: ${reminder.text}.`;
+    }
+    case 'LIST_REMINDERS': {
+      return formatReminderList(await getReminders(userId));
     }
     default:
       throw new Error(`Unknown action type: ${action.type}`);

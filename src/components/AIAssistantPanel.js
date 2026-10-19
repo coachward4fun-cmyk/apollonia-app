@@ -988,7 +988,7 @@ export default function AIAssistantPanel() {
     }));
 
     try {
-      const result = await sendAIMessage(history, adminScreen, userName, { jobs: activeJobs, crews });
+      const result = await sendAIMessage(history, adminScreen, userName, { jobs: activeJobs, crews, userId: user?.uid });
 
       // START_VOICE_FLOW is handled immediately without YES/NO
       if (result.pendingAction?.type === 'START_VOICE_FLOW') {
@@ -1006,6 +1006,16 @@ export default function AIAssistantPanel() {
             speakAndListen(firstQ, 'openended');
           }, 1800);
         }
+        setIsProcessing(false);
+        return;
+      }
+
+      // LIST_REMINDERS is read-only — run it immediately, no YES/NO
+      if (result.pendingAction?.type === 'LIST_REMINDERS') {
+        const listText = await executeAction(result.pendingAction, { userId: user?.uid });
+        addMessage({ role: 'assistant', content: listText });
+        console.log('[Panel] → speakText [handleSend.AI.list-reminders]');
+        speakText(listText);
         setIsProcessing(false);
         return;
       }
@@ -1065,7 +1075,7 @@ export default function AIAssistantPanel() {
     setLocalPending(null);
     setIsProcessing(true);
     try {
-      const result = await executeAction(action);
+      const result = await executeAction(action, { userId: user?.uid });
       addMessage({ role: 'assistant', content: result });
       console.log('[Panel] → speakText [handleConfirm.action-result]');
       speakText(result);
@@ -1074,7 +1084,7 @@ export default function AIAssistantPanel() {
     } finally {
       setIsProcessing(false);
     }
-  }, [localPending, addMessage, speakText]);
+  }, [localPending, addMessage, speakText, user]);
 
   const handleCancel = useCallback(() => {
     setLocalPending(null);

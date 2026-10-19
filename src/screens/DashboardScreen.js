@@ -17,6 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { useAppData } from '../context/AppDataContext';
+import RemindersSection from '../components/RemindersSection';
 
 const TODAY = new Date();
 
@@ -348,6 +349,9 @@ export default function DashboardScreen() {
             onPress={() => navToJobs({ filter: 'Scheduled No Crew' })}
           />
         </View>
+
+        {/* Reminders — current user's personal to-do list */}
+        <RemindersSection />
 
         {/* Next 7 Days */}
         <SectionLabel title="Jobs for Next 7 Days" rightIcon="calendar" onRightIconPress={() => setShowCalendar(true)} />
