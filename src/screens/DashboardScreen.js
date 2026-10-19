@@ -17,7 +17,7 @@ import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme/colors';
 import { useAppData } from '../context/AppDataContext';
-import RemindersSection from '../components/RemindersSection';
+import useReminders, { localTodayStr, isReminderPastDue } from '../hooks/useReminders';
 
 const TODAY = new Date();
 
@@ -170,10 +170,20 @@ export default function DashboardScreen() {
   const { width }  = useWindowDimensions();
   const isPad      = Platform.OS === 'ios' && Platform.isPad;
   const { activeJobs: jobs, crews, customers, lastSync } = useAppData();
+  const { reminders } = useReminders();
   const [refreshing,   setRefreshing]   = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
 
   const stats = useMemo(() => buildStats(jobs), [jobs]);
+
+  const { openReminderCount, pastDueReminderCount } = useMemo(() => {
+    const todayStr = localTodayStr();
+    const open = reminders.filter((r) => !r.done);
+    return {
+      openReminderCount:    open.length,
+      pastDueReminderCount: open.filter((r) => isReminderPastDue(r, todayStr)).length,
+    };
+  }, [reminders]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -350,8 +360,30 @@ export default function DashboardScreen() {
           />
         </View>
 
-        {/* Reminders — current user's personal to-do list */}
-        <RemindersSection />
+        {/* Reminders — current user's personal to-do list; both boxes open RemindersScreen */}
+        <SectionLabel title="Reminders" />
+        <View style={styles.fourRow}>
+          <TouchableOpacity
+            style={styles.pipelineBox}
+            onPress={() => navigation.navigate('Reminders', { filter: 'all' })}
+            activeOpacity={0.72}
+          >
+            <Text style={[styles.pipelineValue, { color: openReminderCount > 0 ? colors.primary : '#9ca3af' }]}>
+              {openReminderCount}
+            </Text>
+            <Text style={styles.pipelineLabel} numberOfLines={1} adjustsFontSizeToFit>Open Reminders</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.pipelineBox}
+            onPress={() => navigation.navigate('Reminders', { filter: 'pastDue' })}
+            activeOpacity={0.72}
+          >
+            <Text style={[styles.pipelineValue, { color: pastDueReminderCount > 0 ? '#dc2626' : '#9ca3af' }]}>
+              {pastDueReminderCount}
+            </Text>
+            <Text style={styles.pipelineLabel} numberOfLines={1} adjustsFontSizeToFit>Past Due</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Next 7 Days */}
         <SectionLabel title="Jobs for Next 7 Days" rightIcon="calendar" onRightIconPress={() => setShowCalendar(true)} />

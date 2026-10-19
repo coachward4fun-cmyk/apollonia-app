@@ -4,7 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 
-import DashboardScreen from '../screens/DashboardScreen';
+import DashboardNavigator from './DashboardNavigator';
 import JobsNavigator from './JobsNavigator';
 import InvoiceScreen from '../screens/InvoiceScreen';
 import CrewsNavigator from './CrewsNavigator';
@@ -58,7 +58,16 @@ function AppTabs() {
         tabBarItemStyle: isPad ? { paddingVertical: 4 } : undefined,
       })}
     >
-      <Tab.Screen name="Dashboard" component={DashboardScreen} />
+      <Tab.Screen
+        name="Dashboard"
+        component={DashboardNavigator}
+        listeners={({ navigation }) => ({
+          tabPress: (e) => {
+            e.preventDefault();
+            navigation.navigate('Dashboard', { screen: 'DashboardHome' });
+          },
+        })}
+      />
       <Tab.Screen
         name="Jobs"
         component={JobsNavigator}

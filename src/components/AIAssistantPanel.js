@@ -8,7 +8,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAIAssistant } from '../context/AIAssistantContext';
 import { useAppData } from '../context/AppDataContext';
 import { useAuth } from '../context/AuthContext';
-import { sendAIMessage, executeAction, extractFlowFields, VOICE_FLOWS } from '../services/aiService';
+import {
+  sendAIMessage, executeAction, extractFlowFields, setReminderDueDateFromSpeech, VOICE_FLOWS,
+} from '../services/aiService';
 import { isOnAdminTab, navigationRef } from '../utils/navigationRef';
 import { saveCustomer, saveJob } from '../services/db';
 import { logActivity } from '../services/activityLog';
@@ -84,6 +86,10 @@ export default function AIAssistantPanel() {
   // "anything else to add?" answer. handleSend intercepts the next message
   // when this ref is non-null, parses extra fields, then navigates.
   const smartCreateFollowupRef = useRef(null);
+  // Set after the AI adds a reminder with no due date: { reminderId, text, step }.
+  // step 'ask' = waiting on "would you like to set a due date?", 'date' = waiting on the date.
+  // Any unrelated reply clears it and the reminder simply stays undated.
+  const reminderDueDateRef = useRef(null);
   // Multi-step state for the fully-voice job-create chain (driving / hands-free).
   // Shape: { customer, matchedType, targetDate, step, collected }.
   // When set, handleSend routes each utterance through the conversational
@@ -125,6 +131,7 @@ export default function AIAssistantPanel() {
       awaitingPendingConfirmationRef.current = false;
       smartCreateFollowupRef.current = null;
       voiceCreateStateRef.current = null;
+      reminderDueDateRef.current = null;
     }
   }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -790,6 +797,52 @@ export default function AIAssistantPanel() {
       // Anything else → user changed topic; fall through and treat as a new turn.
     }
 
+    // ── Reminder due-date follow-up (after an AI-added reminder) ───────────
+    if (reminderDueDateRef.current) {
+      const pending = reminderDueDateRef.current;
+      reminderDueDateRef.current = null;
+
+      if (isNo(trimmed)) {
+        const msg = 'Okay, no due date.';
+        addMessage({ role: 'assistant', content: msg });
+        console.log('[Panel] → speakText [handleSend.reminderDue.no]');
+        speakText(msg);
+        return;
+      }
+
+      // Bare "yes" → ask for the date. "Yes, Friday" → parse straight away.
+      const afterYes = isYes(trimmed)
+        ? trimmed.replace(/^(yes|yeah|yep|yup|ok|okay|sure)[\s,.!]*/i, '').trim()
+        : null;
+      if (pending.step === 'ask' && afterYes === '') {
+        reminderDueDateRef.current = { ...pending, step: 'date' };
+        const q = 'What date is it due?';
+        addMessage({ role: 'assistant', content: q });
+        console.log('[Panel] → speakAndListen [handleSend.reminderDue.ask-date]');
+        speakAndListen(q, 'openended');
+        return;
+      }
+
+      if (pending.step === 'date' || afterYes) {
+        setIsProcessing(true);
+        try {
+          const dueDate = await setReminderDueDateFromSpeech(pending.reminderId, afterYes || trimmed);
+          const msg = dueDate
+            ? `Due date set to ${new Date(dueDate + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}.`
+            : "Sorry, I didn't catch a date. The reminder was saved without one.";
+          addMessage({ role: 'assistant', content: msg });
+          console.log('[Panel] → speakText [handleSend.reminderDue.set]');
+          speakText(msg);
+        } catch (err) {
+          addMessage({ role: 'assistant', content: `Couldn't set the due date: ${err.message}` });
+        } finally {
+          setIsProcessing(false);
+        }
+        return;
+      }
+      // Unrelated reply → leave the reminder undated and treat as a new turn.
+    }
+
     // ── Voice job-create chain: address → crew → notes → summary → save ─────
     // Per-step: skip keywords advance without capture; "done" jumps to the
     // summary step (skipping remaining questions); "cancel" aborts entirely.
@@ -1076,15 +1129,22 @@ export default function AIAssistantPanel() {
     setIsProcessing(true);
     try {
       const result = await executeAction(action, { userId: user?.uid });
-      addMessage({ role: 'assistant', content: result });
-      console.log('[Panel] → speakText [handleConfirm.action-result]');
-      speakText(result);
+      const { message, followUp } = typeof result === 'string' ? { message: result } : result;
+      addMessage({ role: 'assistant', content: message });
+      if (followUp?.type === 'REMINDER_DUE_DATE') {
+        reminderDueDateRef.current = { reminderId: followUp.reminderId, text: followUp.text, step: 'ask' };
+        console.log('[Panel] → speakAndListen [handleConfirm.reminder-due-date]');
+        speakAndListen(message, 'yesno');
+      } else {
+        console.log('[Panel] → speakText [handleConfirm.action-result]');
+        speakText(message);
+      }
     } catch (err) {
       addMessage({ role: 'assistant', content: `Action failed: ${err.message}` });
     } finally {
       setIsProcessing(false);
     }
-  }, [localPending, addMessage, speakText, user]);
+  }, [localPending, addMessage, speakText, speakAndListen, user]);
 
   const handleCancel = useCallback(() => {
     setLocalPending(null);

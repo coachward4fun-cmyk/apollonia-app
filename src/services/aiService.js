@@ -104,6 +104,7 @@ Field definitions:
 - jobType: type of job — match to available types (exact name)
 - jobLocationAddress: full job site address (street, city, state)
 - targetDate: target job date in YYYY-MM-DD format (interpret relative dates like "May 20th" using today's date)
+- dueDate: reminder due date in YYYY-MM-DD format (interpret relative dates like "Friday" or "next week" using today's date)
 - crewName: crew name — match to available crews exactly
 - salesperson: salesperson full name
 - name: person or company name
@@ -337,6 +338,20 @@ function formatReminderList(reminders) {
   return `You have ${open.length} open reminder${open.length === 1 ? '' : 's'}:\n${lines.join('\n')}`;
 }
 
+// Sets the due date on a reminder the AI just created, from the user's spoken
+// answer ("Friday", "yes, next Tuesday"). Returns the YYYY-MM-DD string, or
+// null when no date could be parsed.
+export async function setReminderDueDateFromSpeech(reminderId, userText) {
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const { dueDate } = await extractFlowFields({ userText, fieldsToExtract: ['dueDate'], today });
+  if (!dueDate || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return null;
+  await saveReminder({ id: reminderId, dueDate });
+  return dueDate;
+}
+
+// Most actions return a plain string. ADD_REMINDER without a due date returns
+// { message, followUp } so the panel can ask for the date next.
 export async function executeAction(action, { userId = null } = {}) {
   switch (action.type) {
     case 'CREATE_JOB': {
@@ -406,8 +421,14 @@ export async function executeAction(action, { userId = null } = {}) {
       if (!userId) throw new Error('You must be signed in to add reminders.');
       const text = (action.data?.text || '').trim();
       if (!text) throw new Error('Reminder text is required.');
-      await saveReminder({ userId, text, dueDate: action.data.dueDate || null, done: false });
-      return `Reminder added: ${text}${action.data.dueDate ? `, due ${action.data.dueDate}` : ''}.`;
+      const dueDate    = action.data.dueDate || null;
+      const reminderId = await saveReminder({ userId, text, dueDate, done: false });
+      if (dueDate) return `Added: ${text}, due ${dueDate}.`;
+      // No date given — the panel follows up asking for one (see reminderDueDateRef).
+      return {
+        message:  `Added: ${text}. Would you like to set a due date?`,
+        followUp: { type: 'REMINDER_DUE_DATE', reminderId, text },
+      };
     }
     case 'COMPLETE_REMINDER': {
       const reminder = await findReminder(userId, action.data, { openOnly: true });
